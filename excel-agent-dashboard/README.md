@@ -17,6 +17,12 @@ npm run dev
 
 Frontend URL: http://localhost:3000
 
+By default, the dashboard proxies backend calls through Next.js at `/api/backend/*` to `http://127.0.0.1:8000`.
+Optional overrides:
+
+- `BACKEND_URL` (server-side rewrite destination)
+- `NEXT_PUBLIC_API_BASE_URL` (client-side direct URL, if you do not want proxy)
+
 ## Run Backend (FastAPI)
 
 Backend is now a separate project at [../excel-agent-backend](../excel-agent-backend).

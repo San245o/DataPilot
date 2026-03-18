@@ -12,6 +12,8 @@ downloads/
 eggs/
 .eggs/
 lib/
+!excel-agent-dashboard/lib/
+!excel-agent-dashboard/lib/**
 lib64/
 parts/
 sdist/

@@ -95,7 +95,7 @@ const transformationSteps = [
   { label: "Context", icon: Layers },
 ]
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000"
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api/backend"
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(value, max))
