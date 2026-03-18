@@ -128,15 +128,15 @@
   }
 }
 
-/* Modern thin curved scrollbar — universal */
+/* Modern thin curved scrollbar — universal, no arrow buttons */
 * {
   scrollbar-width: thin;
   scrollbar-color: oklch(0.5 0 0 / 30%) transparent;
 }
 
 ::-webkit-scrollbar {
-  width: 5px;
-  height: 5px;
+  width: 4px;
+  height: 4px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
@@ -151,6 +151,11 @@
 ::-webkit-scrollbar-corner {
   background: transparent;
 }
+::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
 
 .dark {
   scrollbar-color: oklch(0.5 0 0 / 35%) transparent;
@@ -162,56 +167,49 @@
   background: oklch(0.6 0 0 / 45%);
 }
 
-/* Force scrollbars always visible on the data table */
+/* Data table scrollbar - slightly more visible */
 .scrollbar-thin {
   overflow: auto !important;
 }
 .scrollbar-thin::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
 }
 .scrollbar-thin::-webkit-scrollbar-track {
-  background: oklch(0.5 0 0 / 12%);
-  border-radius: 4px;
+  background: transparent;
 }
 .scrollbar-thin::-webkit-scrollbar-thumb {
-  background: oklch(0.5 0 0 / 40%);
-  border-radius: 4px;
-  min-height: 40px;
-  min-width: 40px;
+  background: oklch(0.5 0 0 / 35%);
+  border-radius: 9999px;
 }
 .scrollbar-thin::-webkit-scrollbar-thumb:hover {
-  background: oklch(0.5 0 0 / 60%);
+  background: oklch(0.5 0 0 / 55%);
 }
 .scrollbar-thin::-webkit-scrollbar-corner {
-  background: oklch(0.5 0 0 / 8%);
+  background: transparent;
+}
+.scrollbar-thin::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
-.dark .scrollbar-thin::-webkit-scrollbar-track {
-  background: oklch(0.3 0 0 / 30%);
-}
 .dark .scrollbar-thin::-webkit-scrollbar-thumb {
-  background: oklch(0.6 0 0 / 50%);
+  background: oklch(0.6 0 0 / 40%);
 }
 .dark .scrollbar-thin::-webkit-scrollbar-thumb:hover {
-  background: oklch(0.6 0 0 / 70%);
-}
-.dark .scrollbar-thin::-webkit-scrollbar-corner {
-  background: oklch(0.3 0 0 / 20%);
+  background: oklch(0.6 0 0 / 60%);
 }
 
-/* Draggable splitter between panels */
+/* Draggable splitter between panels (vertical) */
 .splitter-handle {
   position: relative;
   cursor: row-resize;
-  background: var(--border);
+  background: transparent;
   transition: background 0.15s ease;
   flex-shrink: 0;
   z-index: 10;
-}
-.splitter-handle:hover,
-.splitter-handle.dragging {
-  background: var(--primary);
+  height: 6px;
 }
 .splitter-handle::before {
   content: '';
@@ -219,14 +217,44 @@
   left: 50%;
   top: 50%;
   transform: translate(-50%, -50%);
-  width: 32px;
-  height: 4px;
+  width: 40px;
+  height: 2px;
   background: oklch(0.5 0 0 / 30%);
   border-radius: 9999px;
+  transition: all 0.15s ease;
 }
 .splitter-handle:hover::before,
 .splitter-handle.dragging::before {
-  background: oklch(0.9 0 0 / 60%);
+  background: oklch(0.6 0.15 145);
+  height: 3px;
+}
+
+/* Draggable splitter for chat panel (horizontal) */
+.splitter-handle-horizontal {
+  position: relative;
+  cursor: col-resize;
+  background: transparent;
+  transition: background 0.15s ease;
+  flex-shrink: 0;
+  z-index: 10;
+  width: 6px;
+}
+.splitter-handle-horizontal::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 2px;
+  height: 40px;
+  background: oklch(0.5 0 0 / 30%);
+  border-radius: 9999px;
+  transition: all 0.15s ease;
+}
+.splitter-handle-horizontal:hover::before,
+.splitter-handle-horizontal.dragging::before {
+  background: oklch(0.6 0.15 145);
+  width: 3px;
 }
 
 /* Fullscreen overlay for panels */

@@ -69,6 +69,15 @@ type DragState = {
   offsetY: number
 } | null
 
+type ResizeState = {
+  id: string
+  startX: number
+  startY: number
+  startWidth: number
+  startHeight: number
+  corner: "se" | "sw" | "ne" | "nw"
+} | null
+
 type ThinkingStep = {
   id: string
   label: string
@@ -96,6 +105,10 @@ const transformationSteps = [
 ]
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api/backend"
+
+// Virtualization constants
+const ROW_HEIGHT = 28 // Height of each row in pixels
+const OVERSCAN = 5 // Extra rows to render above/below viewport
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(value, max))
@@ -194,11 +207,14 @@ export function AgentDashboard() {
   const [maxZIndex, setMaxZIndex] = useState(1)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [dragState, setDragState] = useState<DragState>(null)
+  const [resizeState, setResizeState] = useState<ResizeState>(null)
   const [isDark, setIsDark] = useState(true)
   const [highlightedRows, setHighlightedRows] = useState<Set<number>>(new Set())
   const [fullscreenPanel, setFullscreenPanel] = useState<FullscreenPanel>(null)
   const [splitRatio, setSplitRatio] = useState(0.38)
   const [isSplitterDragging, setIsSplitterDragging] = useState(false)
+  const [chatWidth, setChatWidth] = useState(360)
+  const [isChatSplitterDragging, setIsChatSplitterDragging] = useState(false)
   const [thinkingMode, setThinkingMode] = useState(false)
   const [thinkingSteps, setThinkingSteps] = useState<ThinkingStep[]>([])
   const [expandedCodeIndex, setExpandedCodeIndex] = useState<number | null>(null)
@@ -213,7 +229,73 @@ export function AgentDashboard() {
   const boardRef = useRef<HTMLDivElement | null>(null)
   const chatEndRef = useRef<HTMLDivElement | null>(null)
   const splitContainerRef = useRef<HTMLDivElement | null>(null)
+  const tableContainerRef = useRef<HTMLDivElement | null>(null)
+  const mainContentRef = useRef<HTMLDivElement | null>(null)
   const headers = useMemo(() => Object.keys(rows[0] ?? {}), [rows])
+
+  // Virtualization state
+  const [scrollTop, setScrollTop] = useState(0)
+  const [tableHeight, setTableHeight] = useState(400)
+
+  // Convert highlighted rows set to sorted array for navigation
+  const highlightedRowsArray = useMemo(() => {
+    return Array.from(highlightedRows).sort((a, b) => a - b)
+  }, [highlightedRows])
+  
+  const [currentHighlightIndex, setCurrentHighlightIndex] = useState(0)
+
+  // Calculate virtualized rows
+  const virtualizedData = useMemo(() => {
+    const startIndex = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN)
+    const visibleCount = Math.ceil(tableHeight / ROW_HEIGHT) + OVERSCAN * 2
+    const endIndex = Math.min(rows.length, startIndex + visibleCount)
+    
+    return {
+      startIndex,
+      endIndex,
+      visibleRows: rows.slice(startIndex, endIndex),
+      totalHeight: rows.length * ROW_HEIGHT,
+      offsetTop: startIndex * ROW_HEIGHT
+    }
+  }, [rows, scrollTop, tableHeight])
+
+  // Reset highlight index when highlighted rows change
+  useEffect(() => {
+    setCurrentHighlightIndex(0)
+  }, [highlightedRows])
+
+  // Update table height on resize
+  useEffect(() => {
+    const updateTableHeight = () => {
+      if (tableContainerRef.current) {
+        setTableHeight(tableContainerRef.current.clientHeight)
+      }
+    }
+    updateTableHeight()
+    window.addEventListener("resize", updateTableHeight)
+    return () => window.removeEventListener("resize", updateTableHeight)
+  }, [splitRatio, fullscreenPanel])
+
+  // Navigate to highlighted row
+  const navigateToHighlightedRow = useCallback((direction: "prev" | "next") => {
+    if (highlightedRowsArray.length === 0) return
+    
+    let newIndex: number
+    if (direction === "prev") {
+      newIndex = currentHighlightIndex > 0 ? currentHighlightIndex - 1 : highlightedRowsArray.length - 1
+    } else {
+      newIndex = currentHighlightIndex < highlightedRowsArray.length - 1 ? currentHighlightIndex + 1 : 0
+    }
+    setCurrentHighlightIndex(newIndex)
+    
+    // Scroll to the row using virtualization offset
+    const rowIndex = highlightedRowsArray[newIndex]
+    const tableContainer = tableContainerRef.current
+    if (tableContainer) {
+      const targetScrollTop = rowIndex * ROW_HEIGHT - tableHeight / 2 + ROW_HEIGHT / 2
+      tableContainer.scrollTop = Math.max(0, targetScrollTop)
+    }
+  }, [highlightedRowsArray, currentHighlightIndex, tableHeight])
 
   // Auto-scroll chat
   useEffect(() => {
@@ -237,7 +319,7 @@ export function AgentDashboard() {
     })
   }, [])
 
-  // Splitter drag handling
+  // Splitter drag handling (vertical - data/canvas split)
   useEffect(() => {
     if (!isSplitterDragging) return
 
@@ -258,6 +340,28 @@ export function AgentDashboard() {
       window.removeEventListener("mouseup", handleMouseUp)
     }
   }, [isSplitterDragging])
+
+  // Chat splitter drag handling (horizontal - main content/chat split)
+  useEffect(() => {
+    if (!isChatSplitterDragging) return
+
+    const handleMouseMove = (event: MouseEvent) => {
+      const container = mainContentRef.current
+      if (!container) return
+      const rect = container.getBoundingClientRect()
+      const newWidth = clamp(rect.right - event.clientX, 280, 600)
+      setChatWidth(newWidth)
+    }
+
+    const handleMouseUp = () => setIsChatSplitterDragging(false)
+
+    window.addEventListener("mousemove", handleMouseMove)
+    window.addEventListener("mouseup", handleMouseUp)
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove)
+      window.removeEventListener("mouseup", handleMouseUp)
+    }
+  }, [isChatSplitterDragging])
 
   // Bring widget to front
   const bringToFront = useCallback((widgetId: string) => {
@@ -317,12 +421,12 @@ export function AgentDashboard() {
       setWidgets((prev) =>
         prev.map((widget) => {
           if (widget.id !== dragState.id) return widget
-          const maxX = Math.max(0, rect.width - widget.width)
-          const maxY = Math.max(0, rect.height - widget.height)
+          const newX = event.clientX - rect.left + board.scrollLeft - dragState.offsetX
+          const newY = event.clientY - rect.top + board.scrollTop - dragState.offsetY
           return {
             ...widget,
-            x: clamp(event.clientX - rect.left - dragState.offsetX, 0, maxX),
-            y: clamp(event.clientY - rect.top - dragState.offsetY, 0, maxY),
+            x: Math.max(0, newX),
+            y: Math.max(0, newY),
           }
         })
       )
@@ -344,10 +448,85 @@ export function AgentDashboard() {
     bringToFront(widget.id)
     setDragState({
       id: widget.id,
-      offsetX: event.clientX - boardRect.left - widget.x,
-      offsetY: event.clientY - boardRect.top - widget.y,
+      offsetX: event.clientX - boardRect.left + board.scrollLeft - widget.x,
+      offsetY: event.clientY - boardRect.top + board.scrollTop - widget.y,
     })
   }
+
+  // Widget resize handling
+  const startWidgetResize = (
+    event: React.MouseEvent,
+    widget: VizWidget,
+    corner: "se" | "sw" | "ne" | "nw"
+  ) => {
+    event.stopPropagation()
+    event.preventDefault()
+    bringToFront(widget.id)
+    setResizeState({
+      id: widget.id,
+      startX: event.clientX,
+      startY: event.clientY,
+      startWidth: widget.width,
+      startHeight: widget.height,
+      corner,
+    })
+  }
+
+  useEffect(() => {
+    if (!resizeState) return
+
+    const MIN_WIDTH = 200
+    const MIN_HEIGHT = 150
+
+    const handleMouseMove = (event: MouseEvent) => {
+      const deltaX = event.clientX - resizeState.startX
+      const deltaY = event.clientY - resizeState.startY
+
+      setWidgets((prev) =>
+        prev.map((widget) => {
+          if (widget.id !== resizeState.id) return widget
+
+          let newWidth = resizeState.startWidth
+          let newHeight = resizeState.startHeight
+          let newX = widget.x
+          let newY = widget.y
+
+          // Handle horizontal resize based on corner
+          if (resizeState.corner === "se" || resizeState.corner === "ne") {
+            newWidth = Math.max(MIN_WIDTH, resizeState.startWidth + deltaX)
+          } else {
+            // sw or nw - resize from left edge
+            newWidth = Math.max(MIN_WIDTH, resizeState.startWidth - deltaX)
+            if (newWidth > MIN_WIDTH) {
+              newX = widget.x + (resizeState.startWidth - newWidth)
+            }
+          }
+
+          // Handle vertical resize based on corner
+          if (resizeState.corner === "se" || resizeState.corner === "sw") {
+            newHeight = Math.max(MIN_HEIGHT, resizeState.startHeight + deltaY)
+          } else {
+            // ne or nw - resize from top edge
+            newHeight = Math.max(MIN_HEIGHT, resizeState.startHeight - deltaY)
+            if (newHeight > MIN_HEIGHT) {
+              newY = widget.y + (resizeState.startHeight - newHeight)
+            }
+          }
+
+          return { ...widget, width: newWidth, height: newHeight, x: newX, y: newY }
+        })
+      )
+    }
+
+    const handleMouseUp = () => setResizeState(null)
+
+    window.addEventListener("mousemove", handleMouseMove)
+    window.addEventListener("mouseup", handleMouseUp)
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove)
+      window.removeEventListener("mouseup", handleMouseUp)
+    }
+  }, [resizeState])
 
   const runAgent = async () => {
     if (!prompt.trim()) return
@@ -654,7 +833,7 @@ export function AgentDashboard() {
         </aside>
 
         {/* Main content area */}
-        <div className="flex flex-1 min-h-0 min-w-0 overflow-hidden">
+        <div ref={mainContentRef} className="flex flex-1 min-h-0 min-w-0 overflow-hidden">
           {/* Center: Data + Canvas */}
           <div ref={splitContainerRef} className="flex flex-1 min-w-0 flex-col min-h-0 overflow-hidden">
             {/* Data Table */}
@@ -662,11 +841,35 @@ export function AgentDashboard() {
               className={`flex flex-col min-h-[120px] shrink-0 overflow-hidden ${
                 fullscreenPanel === "data" ? "fullscreen-overlay" : ""
               }`}
-              style={fullscreenPanel === "data" ? {} : { height: `calc(${splitRatio * 100}% - 4px)` }}
+              style={fullscreenPanel === "data" ? {} : { height: `calc(${splitRatio * 100}% - 2px)` }}
             >
               <div className="flex items-center justify-between h-10 px-4 border-b border-border bg-card/30 shrink-0">
                 <span className="text-xs font-semibold text-foreground">Data</span>
                 <div className="flex items-center gap-2">
+                  {/* Highlighted row navigation */}
+                  {highlightedRowsArray.length > 0 && (
+                    <div className="flex items-center gap-1 mr-2">
+                      <button
+                        type="button"
+                        onClick={() => navigateToHighlightedRow("prev")}
+                        className="flex h-6 w-6 items-center justify-center rounded text-primary hover:bg-primary/10 transition-colors"
+                        title="Previous highlighted row"
+                      >
+                        <ChevronLeft className="size-4" />
+                      </button>
+                      <span className="text-[10px] font-medium text-primary min-w-[3rem] text-center">
+                        {currentHighlightIndex + 1} / {highlightedRowsArray.length}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => navigateToHighlightedRow("next")}
+                        className="flex h-6 w-6 items-center justify-center rounded text-primary hover:bg-primary/10 transition-colors"
+                        title="Next highlighted row"
+                      >
+                        <ChevronRight className="size-4" />
+                      </button>
+                    </div>
+                  )}
                   <span className="text-[10px] text-muted-foreground">{headers.length} columns</span>
                   <button
                     type="button"
@@ -678,54 +881,75 @@ export function AgentDashboard() {
                   </button>
                 </div>
               </div>
-              <div className="flex-1 min-h-0 overflow-auto scrollbar-thin">
-                <Table className="w-max min-w-full">
-                  <TableHeader>
-                    <TableRow className="border-b-border hover:bg-transparent">
-                      {headers.map((header) => (
-                        <TableHead
-                          key={header}
-                          className="sticky top-0 z-10 h-8 bg-card/95 backdrop-blur px-3 text-[11px] font-semibold text-muted-foreground whitespace-nowrap"
-                        >
-                          {header}
-                        </TableHead>
-                      ))}
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {rows.map((row, idx) => {
-                      const isHighlighted = highlightedRows.has(idx)
-                      return (
-                        <TableRow
-                          key={idx}
-                          className={`border-b-border/50 transition-colors ${
-                            isHighlighted
-                              ? "bg-primary/15 border-l-[3px] border-l-primary"
-                              : "hover:bg-accent/30"
-                          }`}
-                        >
-                          {headers.map((header) => (
-                            <TableCell
-                              key={`${idx}-${header}`}
-                              className={`px-3 py-1.5 text-xs whitespace-nowrap ${
-                                isHighlighted ? "text-foreground font-medium" : "text-foreground/80"
-                              }`}
-                            >
-                              {String(row[header] ?? "")}
-                            </TableCell>
-                          ))}
-                        </TableRow>
-                      )
-                    })}
-                  </TableBody>
-                </Table>
+              {/* Table with synced scrolling */}
+              <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+                <div 
+                  ref={tableContainerRef}
+                  className="flex-1 min-h-0 overflow-auto scrollbar-thin"
+                  onScroll={(e) => {
+                    const target = e.currentTarget
+                    setScrollTop(target.scrollTop)
+                  }}
+                >
+                  <Table className="w-max min-w-full">
+                    <TableHeader>
+                      <TableRow className="border-b-border hover:bg-transparent">
+                        {headers.map((header) => (
+                          <TableHead
+                            key={header}
+                            className="sticky top-0 z-10 h-8 bg-card/95 backdrop-blur px-3 text-[11px] font-semibold text-muted-foreground whitespace-nowrap"
+                          >
+                            {header}
+                          </TableHead>
+                        ))}
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {virtualizedData.startIndex > 0 && (
+                        <tr style={{ height: virtualizedData.offsetTop }} />
+                      )}
+                      {virtualizedData.visibleRows.map((row, localIdx) => {
+                        const idx = virtualizedData.startIndex + localIdx
+                        const isHighlighted = highlightedRows.has(idx)
+                        const isCurrentHighlight = highlightedRowsArray.length > 0 && highlightedRowsArray[currentHighlightIndex] === idx
+                        return (
+                          <TableRow
+                            key={idx}
+                            style={{ height: ROW_HEIGHT }}
+                            className={`border-b-border/50 ${
+                              isHighlighted
+                                ? isCurrentHighlight
+                                  ? "bg-primary/25 border-l-[3px] border-l-primary"
+                                  : "bg-primary/15 border-l-[3px] border-l-primary"
+                                : "hover:bg-accent/30"
+                            }`}
+                          >
+                            {headers.map((header) => (
+                              <TableCell
+                                key={`${idx}-${header}`}
+                                className={`px-3 py-1.5 text-xs whitespace-nowrap ${
+                                  isHighlighted ? "text-foreground font-medium" : "text-foreground/80"
+                                }`}
+                              >
+                                {String(row[header] ?? "")}
+                              </TableCell>
+                            ))}
+                          </TableRow>
+                        )
+                      })}
+                      {virtualizedData.endIndex < rows.length && (
+                        <tr style={{ height: (rows.length - virtualizedData.endIndex) * ROW_HEIGHT }} />
+                      )}
+                    </TableBody>
+                  </Table>
+                </div>
               </div>
             </div>
 
             {/* Draggable Splitter */}
             {fullscreenPanel === null && (
               <div
-                className={`h-2 shrink-0 splitter-handle ${isSplitterDragging ? "dragging" : ""}`}
+                className={`shrink-0 splitter-handle ${isSplitterDragging ? "dragging" : ""}`}
                 onMouseDown={() => setIsSplitterDragging(true)}
               />
             )}
@@ -828,6 +1052,31 @@ export function AgentDashboard() {
                         <div className="min-h-0 flex-1 p-2">
                           <PlotlyBoard data={widget.data} layout={widget.layout} isDark={isDark} />
                         </div>
+                        {/* Resize handles at corners */}
+                        <div
+                          className="absolute top-0 left-0 w-4 h-4 cursor-nw-resize group/resize"
+                          onMouseDown={(e) => startWidgetResize(e, widget, "nw")}
+                        >
+                          <div className="absolute top-0.5 left-0.5 w-2.5 h-2.5 border-t-2 border-l-2 border-muted-foreground/30 group-hover/resize:border-primary transition-colors rounded-tl" />
+                        </div>
+                        <div
+                          className="absolute top-0 right-0 w-4 h-4 cursor-ne-resize group/resize"
+                          onMouseDown={(e) => startWidgetResize(e, widget, "ne")}
+                        >
+                          <div className="absolute top-0.5 right-0.5 w-2.5 h-2.5 border-t-2 border-r-2 border-muted-foreground/30 group-hover/resize:border-primary transition-colors rounded-tr" />
+                        </div>
+                        <div
+                          className="absolute bottom-0 left-0 w-4 h-4 cursor-sw-resize group/resize"
+                          onMouseDown={(e) => startWidgetResize(e, widget, "sw")}
+                        >
+                          <div className="absolute bottom-0.5 left-0.5 w-2.5 h-2.5 border-b-2 border-l-2 border-muted-foreground/30 group-hover/resize:border-primary transition-colors rounded-bl" />
+                        </div>
+                        <div
+                          className="absolute bottom-0 right-0 w-4 h-4 cursor-se-resize group/resize"
+                          onMouseDown={(e) => startWidgetResize(e, widget, "se")}
+                        >
+                          <div className="absolute bottom-0.5 right-0.5 w-2.5 h-2.5 border-b-2 border-r-2 border-muted-foreground/30 group-hover/resize:border-primary transition-colors rounded-br" />
+                        </div>
                       </div>
                     ))
                   ) : (
@@ -842,10 +1091,16 @@ export function AgentDashboard() {
             </div>
           </div>
 
+          {/* Chat Splitter */}
+          <div
+            className={`w-1 shrink-0 cursor-col-resize splitter-handle-horizontal ${isChatSplitterDragging ? "dragging" : ""}`}
+            onMouseDown={() => setIsChatSplitterDragging(true)}
+          />
+
           {/* Right Panel: Chat */}
-          <div className="flex w-[360px] shrink-0 flex-col border-l border-border bg-card/30">
+          <div className="flex shrink-0 flex-col bg-card/30" style={{ width: chatWidth }}>
             {/* Chat messages */}
-            <div className="flex-1 min-h-0 overflow-auto p-3 space-y-3">
+            <div className="flex-1 min-h-0 overflow-auto p-3 space-y-3 scrollbar-thin">
               {chatMessages.map((message, index) => (
                 <div
                   key={`${message.role}-${index}`}
@@ -864,7 +1119,7 @@ export function AgentDashboard() {
                   </div>
                   {/* Code toggle button - only for assistant messages with code */}
                   {message.role === "assistant" && message.code && (
-                    <div className="mt-1">
+                    <div className="mt-1 w-full max-w-[90%]">
                       <button
                         type="button"
                         onClick={() => setExpandedCodeIndex(expandedCodeIndex === index ? null : index)}
@@ -878,7 +1133,7 @@ export function AgentDashboard() {
                         {expandedCodeIndex === index ? "Hide code" : "View code"}
                       </button>
                       {expandedCodeIndex === index && (
-                        <pre className="mt-1.5 max-w-[90%] max-h-40 overflow-auto rounded-lg bg-[oklch(0.1_0_0)] p-2.5 text-[11px] font-mono text-[oklch(0.7_0_0)] border border-border">
+                        <pre className="mt-1.5 w-full overflow-x-auto rounded-lg bg-[oklch(0.1_0_0)] p-2.5 text-[11px] font-mono text-[oklch(0.7_0_0)] border border-border whitespace-pre">
                           {message.code}
                         </pre>
                       )}

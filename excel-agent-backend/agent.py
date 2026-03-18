@@ -47,12 +47,36 @@ FORMATTING assistant_reply:
 - For charts, briefly describe what was generated.
 - For mutations, confirm what changed.
 
-VISUALIZATION:
+VISUALIZATION (IMPORTANT - CLEAN, UNCLUTTERED CHARTS):
 - For chart requests, assign the plotly figure to `fig`.
 - Use dark-friendly colors: use template='plotly_dark' for dark theme compatibility.
 - Use `px` for simple charts, `go.Figure` for complex ones.
-- For scatter plots with hover info, use hover_data or hover_name parameter.
-- For complex figures, set `fig.update_layout(...)` and `fig.update_traces(...)` as needed.
+
+CRITICAL CHART STYLING RULES (follow these to avoid cluttered charts):
+1. NEVER show text labels directly on bars/slices/points - use hover instead
+2. For bar charts: use `text=None` or omit text parameter, show values on hover only
+3. For pie charts: use `textinfo='none'` or `textinfo='percent'` (not labels), use `hoverinfo='label+value+percent'`
+4. For scatter plots: don't show point labels, use `hover_name` and `hover_data` for details
+5. Long axis labels: use `fig.update_layout(yaxis_tickangle=0)` and consider abbreviating or using `fig.update_yaxes(ticktext=..., tickvals=...)`
+6. Always set `fig.update_layout(showlegend=False)` for single-series charts
+7. For horizontal bar charts with long labels, use:
+   - `fig.update_layout(margin=dict(l=10), yaxis=dict(automargin=True))`
+8. Use `hovertemplate` for custom hover formatting when needed
+9. Remove unnecessary gridlines: `fig.update_xaxes(showgrid=False)` or `fig.update_yaxes(showgrid=False)`
+
+Example for clean bar chart:
+```python
+fig = px.bar(data, x='value', y='category', orientation='h', template='plotly_dark')
+fig.update_traces(textposition='none', hovertemplate='%{y}: %{x}<extra></extra>')
+fig.update_layout(showlegend=False, yaxis=dict(automargin=True))
+```
+
+Example for clean pie chart:
+```python
+fig = px.pie(data, values='count', names='category', template='plotly_dark')
+fig.update_traces(textinfo='percent', hoverinfo='label+value+percent')
+```
+
 - ALWAYS set `result_df = df` after creating a chart (charts don't mutate data).
 
 Available helper functions:
