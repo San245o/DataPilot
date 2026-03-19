@@ -124,11 +124,6 @@ def generate_code(
     history: list[dict[str, str]],
 ) -> dict[str, str]:
     api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError("GEMINI_API_KEY is not set")
-
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(model_name or "gemini-3-flash-preview")
 
     compact_history = history[-8:]
     user_message = (
@@ -139,8 +134,40 @@ def generate_code(
         "Return strict JSON only. Format list results as bullet points in assistant_reply."
     )
 
-    response = model.generate_content([SYSTEM_TEMPLATE, user_message])
-    raw = response.text or ""
+    if model_name and (model_name.startswith("openai/") or model_name.startswith("gpt-")):
+        from azure.ai.inference import ChatCompletionsClient
+        from azure.ai.inference.models import SystemMessage, UserMessage
+        from azure.core.credentials import AzureKeyCredential
+
+        github_token = os.getenv("GITHUB_TOKEN")
+        if not github_token:
+            raise RuntimeError("GITHUB_TOKEN is not set")
+            
+        client = ChatCompletionsClient(
+            endpoint="https://models.github.ai/inference",
+            credential=AzureKeyCredential(github_token),
+        )
+        
+        response = client.complete(
+            messages=[
+                SystemMessage(SYSTEM_TEMPLATE),
+                UserMessage(user_message),
+            ],
+            temperature=0, # Using low temp for code gen
+            model=model_name
+        )
+        
+        raw = response.choices[0].message.content or ""
+    else:
+        if not api_key:
+            raise RuntimeError("GEMINI_API_KEY is not set")
+
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(model_name or "gemini-3-flash-preview")
+
+        response = model.generate_content([SYSTEM_TEMPLATE, user_message])
+        raw = response.text or ""
+
     payload = _extract_json(raw)
 
     code = payload.get("code", "")

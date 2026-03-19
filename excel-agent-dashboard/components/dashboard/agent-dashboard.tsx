@@ -827,6 +827,7 @@ export function AgentDashboard() {
               >
                 <option value="gemini-3-flash-preview">Gemini 3 Flash</option>
                 <option value="gemini-3.1-flash-lite-preview">Gemini 3.1 Flash Lite</option>
+                <option value="openai/gpt-4.1">GPT 4.1 (GitHub Models)</option>
               </select>
             </div>
           )}
