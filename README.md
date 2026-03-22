@@ -86,6 +86,10 @@ Data_Pilot/
 3. **Interact with Charts**: Drag charts around the canvas, click to bring to front
 4. **Toggle Thinking Mode**: Click the sparkles button to see step-by-step AI progress
 
+
+## Logging
+tail -f server.log 
+
 ## Models
 
 The application uses Google Gemini models:

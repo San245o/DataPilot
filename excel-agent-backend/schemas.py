@@ -11,7 +11,7 @@ class ChatMessage(BaseModel):
 class AgentRequest(BaseModel):
     prompt: str
     rows: list[dict[str, Any]] = Field(default_factory=list)
-    model: str = "gemini-3-flash-preview"
+    model: str = "gemini-2.0-flash"
     history: list[ChatMessage] = Field(default_factory=list)
 
 

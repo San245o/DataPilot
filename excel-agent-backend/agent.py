@@ -7,113 +7,250 @@ from typing import Any
 
 import google.generativeai as genai
 
-SYSTEM_TEMPLATE = """
-You are a data analysis agent. You work with pandas DataFrames and plotly for visualization.
+SYSTEM_PROMPT_BASE = """You are a data analysis agent using pandas and plotly.
 
-Return ONLY strict JSON with this exact schema (no markdown fences, no extra text):
-{
-  "code": "python code as a string",
-  "assistant_reply": "your reply to the user in markdown format"
-}
+RESPONSE FORMAT - Return ONLY valid JSON (no markdown):
+{"code": "python code", "assistant_reply": "markdown response", "action_type": "query|mutation|visualization|combined"}
 
-ENVIRONMENT (pre-loaded, do NOT import anything):
-- `df` : pandas DataFrame with the user's data
-- `pd`, `np`, `px` (plotly.express), `go` (plotly.graph_objects)
-- `result_df` : you MUST assign this at the end. For read-only queries, set `result_df = df` (unchanged).
+ENVIRONMENT (pre-loaded, NO imports allowed):
+- df: pandas DataFrame with user data
+- pd, np, px (plotly.express), go (plotly.graph_objects)
+- MUST set result_df = df at the end of every code block
 
-QUERY vs MUTATION:
-- READ-ONLY queries (list, show, filter, count, describe, find): Do NOT modify df.
-  Just filter/query and format results. Set `result_df = df` (original unchanged).
-  CRITICAL: Whenever you are asked to "find" or "list" rows, you MUST ALWAYS log the output using `print_query` or `print_table` AND you MUST call `highlight_rows()` with the indices of those found rows.
-- MUTATIONS (add/delete/edit column/row, rename, transform): Use the helper functions.
-  These automatically update df.
+═══════════════════════════════════════════════════════════════
+HELPER FUNCTIONS - READ CAREFULLY:
+═══════════════════════════════════════════════════════════════
 
-ALWAYS HIGHLIGHT RELEVANT ROWS:
-- After ANY filtering, querying, or finding matching rows, ALWAYS call `highlight_rows(indices)`.
-- For combined prompts (e.g. "list horror movies AND change rating of X to Y"):
-  1. First find and highlight the relevant rows
-  2. Then perform the mutation
-  3. Call highlight_rows() with the indices of the relevant/matched rows
-- Example:
-  ```
-  horror = df[df['genre'].str.contains('Horror', case=False, na=False)]
-  highlight_rows(horror.index.tolist())
-  # Then do mutation...
-  ```
+1. log_output(message: str)
+   - Logs ANY text/data to output panel
+   - USE THIS to display computed results (DataFrames, Series, values)
+   - Example: log_output(my_dataframe.to_string())
+   - Example: log_output(f'Average: {df["Price"].mean():.2f}')
 
-FORMATTING assistant_reply:
-- For listing/query results, format them as bullet points in your assistant_reply.
-  Example: "Found 3 movies with rating > 9:\\n- The Shawshank Redemption (9.3)\\n- The Godfather (9.2)\\n- The Dark Knight (9.0)"
-- Keep it concise. Max ~20 items in bullet lists, add "...and N more" if truncated.
-- For charts, briefly describe what was generated.
-- For mutations, confirm what changed.
+2. print_query(filter_expr: str, max_rows=20)
+   - ONLY for filtering df with a pandas query expression
+   - The argument must be a QUERY STRING like "Age > 30", NOT a variable name
+   - Runs df.query(filter_expr) internally
+   - Example: print_query('Price > 1000')  ✓
+   - Example: print_query('Genre == "Horror"')  ✓
+   - WRONG: print_query('my_variable')  ✗ - This will ERROR!
 
-VISUALIZATION (IMPORTANT - CLEAN, UNCLUTTERED CHARTS):
-- For chart requests, assign the plotly figure to `fig`.
-- Use dark-friendly colors: use template='plotly_dark' for dark theme compatibility.
-- Use `px` for simple charts, `go.Figure` for complex ones.
+3. print_table(max_rows=20) - Prints current df snapshot
 
-CRITICAL CHART STYLING RULES (follow these to avoid cluttered charts):
-1. NEVER show text labels directly on bars/slices/points - use hover instead
-2. For bar charts: use `text=None` or omit text parameter, show values on hover only
-3. For pie charts: use `textinfo='none'` or `textinfo='percent'` (not labels), use `hoverinfo='label+value+percent'`
-4. For scatter plots: don't show point labels, use `hover_name` and `hover_data` for details
-5. Long axis labels: use `fig.update_layout(yaxis_tickangle=0)` and consider abbreviating or using `fig.update_yaxes(ticktext=..., tickvals=...)`
-6. Always set `fig.update_layout(showlegend=False)` for single-series charts
-7. For horizontal bar charts with long labels, use:
-   - `fig.update_layout(margin=dict(l=10), yaxis=dict(automargin=True))`
-8. Use `hovertemplate` for custom hover formatting when needed
-9. Remove unnecessary gridlines: `fig.update_xaxes(showgrid=False)` or `fig.update_yaxes(showgrid=False)`
+4. highlight_rows(indices: list[int]) - Highlight rows in UI
 
-Example for clean bar chart:
+5. Mutation helpers (these modify df):
+   - edit_cell(row_idx, column, value)
+   - add_column(name, default=None)
+   - delete_column(name)
+   - rename_column(old_name, new_name)
+   - add_row(row_dict)
+   - delete_row(index)
+
+═══════════════════════════════════════════════════════════════
+CODE PATTERNS:
+═══════════════════════════════════════════════════════════════
+
+PATTERN A - Aggregation/Analysis (use log_output):
 ```python
-fig = px.bar(data, x='value', y='category', orientation='h', template='plotly_dark')
-fig.update_traces(textposition='none', hovertemplate='%{y}: %{x}<extra></extra>')
-fig.update_layout(showlegend=False, yaxis=dict(automargin=True))
+# Find top 5 directors by total income
+result = df.groupby('Director')['Income'].sum().sort_values(ascending=False).head(5)
+log_output('Top 5 Directors by Income:')
+log_output(result.to_string())
+# Highlight rows for top directors
+top_names = result.index.tolist()
+mask = df['Director'].isin(top_names)
+highlight_rows(df[mask].index.tolist())
+result_df = df
 ```
 
-Example for clean pie chart:
+PATTERN B - Filter with condition (can use print_query):
 ```python
-fig = px.pie(data, values='count', names='category', template='plotly_dark')
-fig.update_traces(textinfo='percent', hoverinfo='label+value+percent')
+# Find all movies with rating > 8
+print_query('Rating > 8')  # This filters df where Rating > 8
+result_df = df
 ```
 
-- ALWAYS set `result_df = df` after creating a chart (charts don't mutate data).
+PATTERN C - Complex filter (use boolean indexing + log_output):
+```python
+# Find horror movies from 2020s
+mask = (df['Genre'].str.contains('Horror', case=False, na=False)) & (df['Year'] >= 2020)
+filtered = df[mask]
+log_output(f'Found {len(filtered)} horror movies from 2020s:')
+log_output(filtered[['Title', 'Year', 'Rating']].head(20).to_string())
+highlight_rows(filtered.index.tolist())
+result_df = df
+```
 
-Available helper functions:
-- `highlight_rows(indices: list[int])` - highlight rows in the UI table
-- `print_query(query_expr, max_rows=20)` - run df.query() and log output
-- `print_table(max_rows=20)` - log current df snapshot
-- `log_output(message)` - log text to output
-- `add_column(name, default=None)` -> DataFrame (mutates)
-- `delete_column(name)` -> DataFrame (mutates)
-- `rename_column(old_name, new_name)` -> DataFrame (mutates)
-- `add_row(row_data: dict)` -> DataFrame (mutates)
-- `delete_row(index: int)` -> DataFrame (mutates)
-- `edit_cell(row_index, column, value)` -> DataFrame (mutates)
-- `table_to_csv(max_rows=200)` -> str
+PATTERN D - Mutation:
+```python
+# Replace team name
+df['Team'] = df['Team'].str.replace('Old Name', 'New Name', case=False)
+mask = df['Team'].str.contains('New Name', case=False, na=False)
+highlight_rows(df[mask].index.tolist())
+log_output(f'Updated {mask.sum()} rows')
+result_df = df
+```
 
-CODE RULES:
-- Do NOT import anything (no `import ...` or `from ... import ...`). Only use the libraries provided in the pre-loaded ENVIRONMENT list. Many sandbox issues are created if you try to import other libraries.
-- Use single quotes for strings in code to avoid JSON issues.
-- ALWAYS set `result_df = df` at the end (even for read-only queries).
-  If helpers mutated df, still set `result_df = df` since df reference is updated.
-- Handle missing values with .dropna() or .fillna() where needed.
-- For filtering, use boolean indexing: `df[df['col'] > val]`
-- For string matching, use `.str.contains('pattern', case=False, na=False)`
+═══════════════════════════════════════════════════════════════
+RULES:
+═══════════════════════════════════════════════════════════════
+- NO imports - only use pd, np, px, go
+- Use single quotes in code strings
+- ALWAYS end with: result_df = df
+- Use .to_string() when logging DataFrames/Series
+- Handle NaN: use .dropna() or .fillna() as needed
+- String matching: .str.contains('pattern', case=False, na=False)
 """
 
+VIZ_RULES = """
+═══════════════════════════════════════════════════════════════
+VISUALIZATION RULES - Clean, readable charts:
+═══════════════════════════════════════════════════════════════
 
-def _extract_json(raw_text: str) -> dict[str, Any]:
-    text = raw_text.strip()
-    code_block = re.search(r"```(?:json)?\s*(.*?)```", text, flags=re.DOTALL)
-    if code_block:
-        text = code_block.group(1).strip()
+CRITICAL - Follow these to avoid cluttered charts:
+1. Always: template='plotly_dark'
+2. NO text on bars/slices - hover only
+3. Limit to top 10-15 categories max
+4. Single series: showlegend=False
+5. Long labels: horizontal bars, automargin
 
+BAR CHART (horizontal for long labels):
+```python
+data = df.groupby('Category')['Value'].sum().nlargest(10).reset_index()
+fig = px.bar(data, x='Value', y='Category', orientation='h', template='plotly_dark',
+             title='Top 10 Categories by Value')
+fig.update_traces(hovertemplate='%{y}: %{x:,.0f}<extra></extra>')
+fig.update_layout(showlegend=False, yaxis={'categoryorder':'total ascending'},
+                  yaxis_title='', xaxis_title='Value')
+result_df = df
+```
+
+LINE CHART (trends over time):
+```python
+trend = df.groupby('Year')['Value'].mean().reset_index()
+fig = px.line(trend, x='Year', y='Value', template='plotly_dark',
+              title='Average Value by Year', markers=True)
+fig.update_traces(hovertemplate='Year %{x}: %{y:,.0f}<extra></extra>')
+result_df = df
+```
+
+MULTI-LINE (comparing categories):
+```python
+# Pivot for multiple series
+pivot = df.groupby(['Year', 'Category'])['Value'].sum().reset_index()
+fig = px.line(pivot, x='Year', y='Value', color='Category', template='plotly_dark',
+              title='Value Trends by Category', markers=True)
+fig.update_layout(hovermode='x unified')
+result_df = df
+```
+
+PIE CHART:
+```python
+counts = df['Category'].value_counts().head(8)
+fig = px.pie(values=counts.values, names=counts.index, template='plotly_dark',
+             title='Distribution by Category')
+fig.update_traces(textinfo='percent', hoverinfo='label+value+percent')
+result_df = df
+```
+
+SCATTER PLOT:
+```python
+fig = px.scatter(df, x='Budget', y='Revenue', template='plotly_dark',
+                 hover_data=['Title'], title='Budget vs Revenue')
+fig.update_traces(hovertemplate='%{customdata[0]}<br>Budget: %{x:$,.0f}<br>Revenue: %{y:$,.0f}<extra></extra>')
+result_df = df
+```
+"""
+
+MERGE_RULES = """
+MERGE/JOIN NOTE: Only one DataFrame (df) available. For self-joins:
+```python
+subset = df[df['Type'] == 'A']
+merged = df.merge(subset[['Key', 'Value']], on='Key', suffixes=('', '_A'))
+```
+"""
+
+STATS_RULES = """
+STATISTICS (no scipy, use numpy/pandas):
+- Correlation: df['a'].corr(df['b']) or df.corr()
+- Stats: df.describe(), .mean(), .std(), .quantile([0.25, 0.5, 0.75])
+- Outliers: Q1, Q3 = col.quantile([0.25, 0.75]); IQR = Q3 - Q1; outliers = col[(col < Q1-1.5*IQR) | (col > Q3+1.5*IQR)]
+- Regression: coeffs = np.polyfit(x, y, 1); trend_line = np.poly1d(coeffs)
+"""
+
+TIME_RULES = """
+TIME SERIES:
+- Parse: df['date'] = pd.to_datetime(df['date'], errors='coerce')
+- Resample: df.set_index('date').resample('M').mean()
+- Group: df.groupby(df['date'].dt.year).sum()
+- Rolling: df['col'].rolling(window=7).mean()
+"""
+
+_VIZ_KW = {'chart', 'plot', 'graph', 'pie', 'bar', 'scatter', 'visual', 'histogram', 'heatmap', 'line', 'bubble', 'distribution', 'trend', 'compare'}
+_MERGE_KW = {'merge', 'join', 'combine tables', 'match records', 'link'}
+_STATS_KW = {'correlation', 'regression', 'distribution', 'outlier', 'significance', 'p-value', 'statistical', 'std', 'variance'}
+_TIME_KW = {'over time', 'by year', 'by month', 'by date', 'forecast', 'time series', 'yearly', 'monthly', 'daily', 'trend'}
+_MUTATION_KW = {'change', 'update', 'replace', 'rename', 'delete', 'add', 'edit', 'merge', 'set', 'modify', 'remove', 'fix', 'correct', 'convert'}
+
+
+def _build_system_prompt(prompt: str) -> str:
+    p = prompt.lower()
+    parts = [SYSTEM_PROMPT_BASE]
+    if any(k in p for k in _VIZ_KW):
+        parts.append(VIZ_RULES)
+    if any(k in p for k in _MERGE_KW):
+        parts.append(MERGE_RULES)
+    if any(k in p for k in _STATS_KW):
+        parts.append(STATS_RULES)
+    if any(k in p for k in _TIME_KW):
+        parts.append(TIME_RULES)
+    return "\n".join(parts)
+
+
+def _is_mutation_only(prompt: str) -> bool:
+    p = prompt.lower()
+    has_mutation = any(k in p for k in _MUTATION_KW)
+    has_viz = any(k in p for k in _VIZ_KW)
+    return has_mutation and not has_viz
+
+
+def _extract_mentioned_columns(prompt: str, columns: list[str]) -> set[str]:
+    p = prompt.lower()
+    mentioned = set()
+    for col in columns:
+        col_lower = col.lower()
+        col_spaced = col_lower.replace('_', ' ')
+        if col_lower in p or col_spaced in p:
+            mentioned.add(col)
+    return mentioned
+
+
+def _extract_json(raw: str) -> dict[str, Any]:
+    text = raw.strip()
+    m = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+    if m:
+        text = m.group(1).strip()
+    start = text.find('{')
+    end = text.rfind('}')
+    if start != -1 and end != -1:
+        text = text[start:end+1]
     payload = json.loads(text)
     if not isinstance(payload, dict):
-        raise ValueError("Gemini output must be a JSON object")
+        raise ValueError("Expected JSON object")
     return payload
+
+
+def _trim_history(history: list[dict[str, str]], max_turns: int = 4) -> list[dict[str, str]]:
+    h = history[-max_turns:] if len(history) > max_turns else list(history)
+    result = []
+    for turn in h:
+        c = turn.get("content", "")
+        if turn.get("role") == "assistant":
+            result.append({"role": "assistant", "content": c[:400] + "..." if len(c) > 400 else c})
+        else:
+            result.append({"role": turn.get("role", "user"), "content": c[:200] if len(c) > 200 else c})
+    return result
 
 
 def generate_code(
@@ -121,19 +258,140 @@ def generate_code(
     prompt: str,
     model_name: str,
     columns: list[str],
+    dtypes: dict[str, str],
+    nulls: dict[str, int],
+    value_ranges: dict[str, dict],
+    top_categories: dict[str, list],
     sample_rows: list[dict[str, Any]],
     history: list[dict[str, str]],
 ) -> dict[str, Any]:
     api_key = os.getenv("GEMINI_API_KEY")
+    system_prompt = _build_system_prompt(prompt)
+    trimmed_history = _trim_history(history)
+    is_mutation = _is_mutation_only(prompt)
+    mentioned = _extract_mentioned_columns(prompt, columns)
 
-    compact_history = history[-8:]
-    user_message = (
-        f"User prompt: {prompt}\n"
-        f"Columns: {json.dumps(columns, ensure_ascii=True)}\n"
-        f"Random 5 sample rows: {json.dumps(sample_rows, ensure_ascii=True)}\n"
-        f"Recent chat history: {json.dumps(compact_history, ensure_ascii=True)}\n"
-        "Return strict JSON only. Format list results as bullet points in assistant_reply."
-    )
+    # Build context
+    ctx = [f"User request: {prompt}"]
+    ctx.append(f"Columns: {json.dumps(columns)}")
+    ctx.append(f"Types: {json.dumps(dtypes)}")
+
+    # Nulls if any
+    has_nulls = {k: v for k, v in nulls.items() if v > 0}
+    if has_nulls:
+        ctx.append(f"Nulls: {json.dumps(has_nulls)}")
+
+    # Value ranges and categories for non-mutations
+    if not is_mutation:
+        if value_ranges:
+            relevant = {k: v for k, v in value_ranges.items() if k in mentioned}
+            if len(relevant) < 6:
+                for k, v in list(value_ranges.items())[:8]:
+                    if k not in relevant:
+                        relevant[k] = v
+            if relevant:
+                ctx.append(f"Numeric ranges: {json.dumps(relevant)}")
+
+        if top_categories:
+            relevant = {k: v for k, v in top_categories.items() if k in mentioned}
+            if len(relevant) < 6:
+                for k, v in list(top_categories.items())[:8]:
+                    if k not in relevant:
+                        relevant[k] = v
+            if relevant:
+                ctx.append(f"Categories: {json.dumps(relevant)}")
+
+    if sample_rows:
+        ctx.append(f"Sample rows: {json.dumps(sample_rows)}")
+
+    if trimmed_history:
+        ctx.append(f"History: {json.dumps(trimmed_history)}")
+
+    ctx.append("\nReturn valid JSON only.")
+
+    user_message = "\n".join(ctx)
+    usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+    if model_name and (model_name.startswith("openai/") or model_name.startswith("gpt-")):
+        from azure.ai.inference import ChatCompletionsClient
+        from azure.ai.inference.models import SystemMessage, UserMessage
+        from azure.core.credentials import AzureKeyCredential
+
+        github_token = os.getenv("GITHUB_TOKEN")
+        if not github_token:
+            raise RuntimeError("GITHUB_TOKEN not set")
+
+        client = ChatCompletionsClient(
+            endpoint="https://models.github.ai/inference",
+            credential=AzureKeyCredential(github_token),
+        )
+        response = client.complete(
+            messages=[SystemMessage(system_prompt), UserMessage(user_message)],
+            temperature=0,
+            model=model_name,
+        )
+        raw = response.choices[0].message.content or ""
+        if hasattr(response, "usage") and response.usage:
+            usage["prompt_tokens"] = response.usage.prompt_tokens
+            usage["completion_tokens"] = response.usage.completion_tokens
+            usage["total_tokens"] = response.usage.total_tokens
+    else:
+        if not api_key:
+            raise RuntimeError("GEMINI_API_KEY not set")
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(model_name or "gemini-2.0-flash")
+        response = model.generate_content([system_prompt, user_message])
+        raw = response.text or ""
+        if hasattr(response, "usage_metadata") and response.usage_metadata:
+            usage["prompt_tokens"] = response.usage_metadata.prompt_token_count
+            usage["completion_tokens"] = response.usage_metadata.candidates_token_count
+            usage["total_tokens"] = response.usage_metadata.total_token_count
+
+    payload = _extract_json(raw)
+    code = payload.get("code", "")
+    reply = payload.get("assistant_reply", "Done.")
+    action = payload.get("action_type", "query")
+
+    if not isinstance(code, str) or not code.strip():
+        raise ValueError("No valid code returned")
+    if not isinstance(reply, str):
+        reply = "Done."
+    if action not in ("query", "mutation", "visualization", "combined"):
+        action = "query"
+
+    return {"code": code, "assistant_reply": reply, "action_type": action, "token_usage": usage}
+
+
+def generate_fix(
+    *,
+    prompt: str,
+    model_name: str,
+    columns: list[str],
+    dtypes: dict[str, str],
+    original_code: str,
+    error_message: str,
+) -> dict[str, Any]:
+    api_key = os.getenv("GEMINI_API_KEY")
+    system_prompt = _build_system_prompt(prompt)
+
+    user_message = f"""Original request: {prompt}
+Columns: {json.dumps(columns)}
+Types: {json.dumps(dtypes)}
+
+FAILED CODE:
+```python
+{original_code}
+```
+
+ERROR: {error_message}
+
+COMMON FIXES:
+- print_query() takes a FILTER STRING like 'Price > 100', NOT a variable name
+- To log a computed DataFrame/Series, use: log_output(my_var.to_string())
+- Ensure variables are defined before use
+- Use single quotes for strings
+
+Return fixed JSON."""
 
     usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
@@ -144,22 +402,17 @@ def generate_code(
 
         github_token = os.getenv("GITHUB_TOKEN")
         if not github_token:
-            raise RuntimeError("GITHUB_TOKEN is not set")
-            
+            raise RuntimeError("GITHUB_TOKEN not set")
+
         client = ChatCompletionsClient(
             endpoint="https://models.github.ai/inference",
             credential=AzureKeyCredential(github_token),
         )
-        
         response = client.complete(
-            messages=[
-                SystemMessage(SYSTEM_TEMPLATE),
-                UserMessage(user_message),
-            ],
-            temperature=0, # Using low temp for code gen
-            model=model_name
+            messages=[SystemMessage(system_prompt), UserMessage(user_message)],
+            temperature=0,
+            model=model_name,
         )
-        
         raw = response.choices[0].message.content or ""
         if hasattr(response, "usage") and response.usage:
             usage["prompt_tokens"] = response.usage.prompt_tokens
@@ -167,12 +420,10 @@ def generate_code(
             usage["total_tokens"] = response.usage.total_tokens
     else:
         if not api_key:
-            raise RuntimeError("GEMINI_API_KEY is not set")
-
+            raise RuntimeError("GEMINI_API_KEY not set")
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(model_name or "gemini-3-flash-preview")
-
-        response = model.generate_content([SYSTEM_TEMPLATE, user_message])
+        model = genai.GenerativeModel(model_name or "gemini-2.0-flash")
+        response = model.generate_content([system_prompt, user_message])
         raw = response.text or ""
         if hasattr(response, "usage_metadata") and response.usage_metadata:
             usage["prompt_tokens"] = response.usage_metadata.prompt_token_count
@@ -180,16 +431,17 @@ def generate_code(
             usage["total_tokens"] = response.usage_metadata.total_token_count
 
     payload = _extract_json(raw)
-
     code = payload.get("code", "")
-    assistant_reply = payload.get("assistant_reply", "Done.")
+    reply = payload.get("assistant_reply", "Done.")
+    action = payload.get("action_type", "query")
 
     if not isinstance(code, str) or not code.strip():
-        raise ValueError("Gemini did not return valid code")
-    if not isinstance(assistant_reply, str):
-        assistant_reply = "Done."
+        raise ValueError("No valid code in fix")
+    if action not in ("query", "mutation", "visualization", "combined"):
+        action = "query"
 
-    return {"code": code, "assistant_reply": assistant_reply, "token_usage": usage}
+    return {"code": code, "assistant_reply": reply, "action_type": action, "token_usage": usage}
+
 
 def draft_final_reply(
     prompt: str,
@@ -197,20 +449,18 @@ def draft_final_reply(
     query_output: str | None,
     initial_reply: str,
 ) -> dict[str, Any]:
-    """Drafts a true final response based on the sandbox execution output."""
-    if not query_output or not query_output.strip():
+    if not query_output or len(query_output.strip()) < 10:
         return {"reply": initial_reply, "token_usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}
 
     api_key = os.getenv("GEMINI_API_KEY")
-    user_message = (
-        f"User prompt: '{prompt}'\n"
-        f"The python sandbox execution output was:\n"
-        f"---------\n{query_output}\n---------\n\n"
-        f"Original guessed reply: '{initial_reply}'\n\n"
-        "Please provide the final helpful answer to the user based STRICTLY on the code execution output shown above. "
-        "Do not make up facts or use external knowledge. If the output says something unexpected (like 'Inf' or 'NaN'), explicitly say it. "
-        "Do not explain your internal process. Provide only the final response text without JSON wrapping."
-    )
+    output = query_output[:2000] if len(query_output) > 2000 else query_output
+
+    user_message = f"""User asked: {prompt}
+
+Execution output:
+{output}
+
+Provide a clear, helpful response based ONLY on this output. Format nicely with bullet points for lists."""
 
     usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
@@ -222,21 +472,19 @@ def draft_final_reply(
         github_token = os.getenv("GITHUB_TOKEN")
         if not github_token:
             return {"reply": initial_reply, "token_usage": usage}
-            
+
         client = ChatCompletionsClient(
             endpoint="https://models.github.ai/inference",
             credential=AzureKeyCredential(github_token),
         )
-        
         response = client.complete(
             messages=[
-                SystemMessage("You analyze execution outputs and answer precisely."),
-                UserMessage(user_message),
+                SystemMessage("Summarize data results clearly and concisely."),
+                UserMessage(user_message)
             ],
             temperature=0,
-            model=model_name
+            model=model_name,
         )
-        
         reply = response.choices[0].message.content or initial_reply
         if hasattr(response, "usage") and response.usage:
             usage["prompt_tokens"] = response.usage.prompt_tokens
@@ -246,14 +494,11 @@ def draft_final_reply(
     else:
         if not api_key:
             return {"reply": initial_reply, "token_usage": usage}
-
-        import google.generativeai as genai
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(model_name or "gemini-3-flash-preview")
-
+        model = genai.GenerativeModel(model_name or "gemini-2.0-flash")
         try:
             response = model.generate_content([
-                "You analyze execution outputs and answer the user precisely.",
+                "Summarize data results clearly and concisely.",
                 user_message
             ])
             reply = response.text or initial_reply

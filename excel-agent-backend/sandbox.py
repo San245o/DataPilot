@@ -129,10 +129,34 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
         return updated_df
 
     def log_output(message: Any) -> None:
-        query_logs.append(str(message))
+        # Don't stringify plotly figures - they produce massive JSON
+        if hasattr(message, 'to_plotly_json'):
+            query_logs.append("[Plotly Figure - see visualization]")
+        elif isinstance(message, pd.DataFrame):
+            query_logs.append(message.head(50).to_string())
+        elif isinstance(message, pd.Series):
+            query_logs.append(message.head(50).to_string())
+        else:
+            s = str(message)
+            if len(s) > 5000:
+                s = s[:5000] + "... [truncated]"
+            query_logs.append(s)
 
     def safe_print(*args: Any, **kwargs: Any) -> None:
-        output = " ".join(str(a) for a in args)
+        parts = []
+        for a in args:
+            if hasattr(a, 'to_plotly_json'):
+                parts.append("[Plotly Figure - see visualization]")
+            elif isinstance(a, pd.DataFrame):
+                parts.append(a.head(20).to_string())
+            elif isinstance(a, pd.Series):
+                parts.append(a.head(20).to_string())
+            else:
+                s = str(a)
+                if len(s) > 5000:
+                    s = s[:5000] + "... [truncated]"
+                parts.append(s)
+        output = " ".join(parts)
         query_logs.append(output)
 
     def highlight_rows(indices: list[int]) -> None:
