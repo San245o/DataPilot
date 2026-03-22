@@ -24,6 +24,7 @@ ENVIRONMENT (pre-loaded, do NOT import anything):
 QUERY vs MUTATION:
 - READ-ONLY queries (list, show, filter, count, describe, find): Do NOT modify df.
   Just filter/query and format results. Set `result_df = df` (original unchanged).
+  CRITICAL: Whenever you are asked to "find" or "list" rows, you MUST ALWAYS log the output using `print_query` or `print_table` AND you MUST call `highlight_rows()` with the indices of those found rows.
 - MUTATIONS (add/delete/edit column/row, rename, transform): Use the helper functions.
   These automatically update df.
 
@@ -93,7 +94,7 @@ Available helper functions:
 - `table_to_csv(max_rows=200)` -> str
 
 CODE RULES:
-- Do NOT import anything.
+- Do NOT import anything (no `import ...` or `from ... import ...`). Only use the libraries provided in the pre-loaded ENVIRONMENT list. Many sandbox issues are created if you try to import other libraries.
 - Use single quotes for strings in code to avoid JSON issues.
 - ALWAYS set `result_df = df` at the end (even for read-only queries).
   If helpers mutated df, still set `result_df = df` since df reference is updated.
@@ -122,7 +123,7 @@ def generate_code(
     columns: list[str],
     sample_rows: list[dict[str, Any]],
     history: list[dict[str, str]],
-) -> dict[str, str]:
+) -> dict[str, Any]:
     api_key = os.getenv("GEMINI_API_KEY")
 
     compact_history = history[-8:]
@@ -133,6 +134,8 @@ def generate_code(
         f"Recent chat history: {json.dumps(compact_history, ensure_ascii=True)}\n"
         "Return strict JSON only. Format list results as bullet points in assistant_reply."
     )
+
+    usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
     if model_name and (model_name.startswith("openai/") or model_name.startswith("gpt-")):
         from azure.ai.inference import ChatCompletionsClient
@@ -158,6 +161,10 @@ def generate_code(
         )
         
         raw = response.choices[0].message.content or ""
+        if hasattr(response, "usage") and response.usage:
+            usage["prompt_tokens"] = response.usage.prompt_tokens
+            usage["completion_tokens"] = response.usage.completion_tokens
+            usage["total_tokens"] = response.usage.total_tokens
     else:
         if not api_key:
             raise RuntimeError("GEMINI_API_KEY is not set")
@@ -167,6 +174,10 @@ def generate_code(
 
         response = model.generate_content([SYSTEM_TEMPLATE, user_message])
         raw = response.text or ""
+        if hasattr(response, "usage_metadata") and response.usage_metadata:
+            usage["prompt_tokens"] = response.usage_metadata.prompt_token_count
+            usage["completion_tokens"] = response.usage_metadata.candidates_token_count
+            usage["total_tokens"] = response.usage_metadata.total_token_count
 
     payload = _extract_json(raw)
 
@@ -178,4 +189,78 @@ def generate_code(
     if not isinstance(assistant_reply, str):
         assistant_reply = "Done."
 
-    return {"code": code, "assistant_reply": assistant_reply}
+    return {"code": code, "assistant_reply": assistant_reply, "token_usage": usage}
+
+def draft_final_reply(
+    prompt: str,
+    model_name: str,
+    query_output: str | None,
+    initial_reply: str,
+) -> dict[str, Any]:
+    """Drafts a true final response based on the sandbox execution output."""
+    if not query_output or not query_output.strip():
+        return {"reply": initial_reply, "token_usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}
+
+    api_key = os.getenv("GEMINI_API_KEY")
+    user_message = (
+        f"User prompt: '{prompt}'\n"
+        f"The python sandbox execution output was:\n"
+        f"---------\n{query_output}\n---------\n\n"
+        f"Original guessed reply: '{initial_reply}'\n\n"
+        "Please provide the final helpful answer to the user based STRICTLY on the code execution output shown above. "
+        "Do not make up facts or use external knowledge. If the output says something unexpected (like 'Inf' or 'NaN'), explicitly say it. "
+        "Do not explain your internal process. Provide only the final response text without JSON wrapping."
+    )
+
+    usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+    if model_name and (model_name.startswith("openai/") or model_name.startswith("gpt-")):
+        from azure.ai.inference import ChatCompletionsClient
+        from azure.ai.inference.models import SystemMessage, UserMessage
+        from azure.core.credentials import AzureKeyCredential
+
+        github_token = os.getenv("GITHUB_TOKEN")
+        if not github_token:
+            return {"reply": initial_reply, "token_usage": usage}
+            
+        client = ChatCompletionsClient(
+            endpoint="https://models.github.ai/inference",
+            credential=AzureKeyCredential(github_token),
+        )
+        
+        response = client.complete(
+            messages=[
+                SystemMessage("You analyze execution outputs and answer precisely."),
+                UserMessage(user_message),
+            ],
+            temperature=0,
+            model=model_name
+        )
+        
+        reply = response.choices[0].message.content or initial_reply
+        if hasattr(response, "usage") and response.usage:
+            usage["prompt_tokens"] = response.usage.prompt_tokens
+            usage["completion_tokens"] = response.usage.completion_tokens
+            usage["total_tokens"] = response.usage.total_tokens
+        return {"reply": reply, "token_usage": usage}
+    else:
+        if not api_key:
+            return {"reply": initial_reply, "token_usage": usage}
+
+        import google.generativeai as genai
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(model_name or "gemini-3-flash-preview")
+
+        try:
+            response = model.generate_content([
+                "You analyze execution outputs and answer the user precisely.",
+                user_message
+            ])
+            reply = response.text or initial_reply
+            if hasattr(response, "usage_metadata") and response.usage_metadata:
+                usage["prompt_tokens"] = response.usage_metadata.prompt_token_count
+                usage["completion_tokens"] = response.usage_metadata.candidates_token_count
+                usage["total_tokens"] = response.usage_metadata.total_token_count
+            return {"reply": reply, "token_usage": usage}
+        except Exception:
+            return {"reply": initial_reply, "token_usage": usage}

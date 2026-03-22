@@ -55,6 +55,8 @@ def _sanitize_for_json(obj: Any) -> Any:
         return obj
     if isinstance(obj, np.bool_):
         return bool(obj)
+    if pd.api.types.is_scalar(obj) and pd.isna(obj):
+        return None
     return obj
 
 FORBIDDEN_NAMES = {
@@ -107,6 +109,7 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
     _validate_code(code)
 
     df = pd.DataFrame(rows)
+    df.replace("", np.nan, inplace=True)
     original_df = df.copy()
     query_logs: list[str] = []
     mutation_flag: list[bool] = [False]
@@ -305,7 +308,7 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
 
     return {
         "ok": True,
-        "rows": result_df.to_dict(orient="records"),
+        "rows": _sanitize_for_json(result_df.to_dict(orient="records")),
         "visualization": visualization,
         "query_output": query_output,
         "mutation": mutation_flag[0],

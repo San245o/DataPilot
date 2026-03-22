@@ -19,6 +19,7 @@ import {
   Sparkles,
   Sun,
   Upload,
+  Download,
   X,
 } from "lucide-react"
 import type { Data, Layout } from "plotly.js"
@@ -46,11 +47,17 @@ type AgentExecuteResponse = {
   detail?: string
   mutation?: boolean
   highlight_indices?: number[]
+  token_usage?: {
+    prompt_tokens: number
+    completion_tokens: number
+    total_tokens: number
+  }
 }
 type ChatMessage = {
   role: "user" | "assistant"
   content: string
   code?: string
+  query_output?: string | null
 }
 type VizWidget = {
   id: string
@@ -75,6 +82,8 @@ type ResizeState = {
   startY: number
   startWidth: number
   startHeight: number
+  startWidgetX: number
+  startWidgetY: number
   corner: "se" | "sw" | "ne" | "nw"
 } | null
 
@@ -100,8 +109,7 @@ const seedRows: SheetRow[] = [
 
 const transformationSteps = [
   { label: "Upload", icon: Upload },
-  { label: "Infer", icon: Database },
-  { label: "Context", icon: Layers },
+  { label: "Context", icon: Layers, isContextButton: true },
 ]
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api/backend"
@@ -219,6 +227,9 @@ export function AgentDashboard() {
   const [thinkingSteps, setThinkingSteps] = useState<ThinkingStep[]>([])
   const [expandedCodeIndex, setExpandedCodeIndex] = useState<number | null>(null)
   const [chartMenuOpen, setChartMenuOpen] = useState(false)
+  const [isContextOpen, setIsContextOpen] = useState(false)
+  const [totalTokens, setTotalTokens] = useState({ prompt: 0, completion: 0, total: 0 })
+  const [queryCount, setQueryCount] = useState(0)
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
     {
       role: "assistant",
@@ -236,6 +247,16 @@ export function AgentDashboard() {
   // Virtualization state
   const [scrollTop, setScrollTop] = useState(0)
   const [tableHeight, setTableHeight] = useState(400)
+
+  // Column width state
+  const [colWidths, setColWidths] = useState<Record<string, number>>({})
+  const resizingCol = useRef<{ key: string, startX: number, startWidth: number } | null>(null)
+
+  const totalTableWidth = useMemo(() => {
+    if (!headers || headers.length === 0) return "100%"
+    const width = headers.reduce((sum, h) => sum + (colWidths[h] || 150), 0)
+    return Math.max(width, 100) // fallback minimum
+  }, [headers, colWidths])
 
   // Convert highlighted rows set to sorted array for navigation
   const highlightedRowsArray = useMemo(() => {
@@ -275,6 +296,30 @@ export function AgentDashboard() {
     window.addEventListener("resize", updateTableHeight)
     return () => window.removeEventListener("resize", updateTableHeight)
   }, [splitRatio, fullscreenPanel])
+
+  // Column resizing effect
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!resizingCol.current) return
+      const { key, startX, startWidth } = resizingCol.current
+      const newWidth = Math.max(50, startWidth + (e.clientX - startX)) // 50px min width
+      setColWidths((prev) => ({ ...prev, [key]: newWidth }))
+    }
+
+    const handleMouseUp = () => {
+      if (resizingCol.current) {
+        resizingCol.current = null
+        document.body.style.cursor = ""
+      }
+    }
+
+    window.addEventListener("mousemove", handleMouseMove)
+    window.addEventListener("mouseup", handleMouseUp)
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove)
+      window.removeEventListener("mouseup", handleMouseUp)
+    }
+  }, [])
 
   // Navigate to highlighted row
   const navigateToHighlightedRow = useCallback((direction: "prev" | "next") => {
@@ -410,6 +455,14 @@ export function AgentDashboard() {
     }
   }
 
+  const handleDownloadExcel = () => {
+    if (!rows || rows.length === 0) return
+    const worksheet = XLSX.utils.json_to_sheet(rows)
+    const workbook = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Data")
+    XLSX.writeFile(workbook, `modified_${datasetName.replace(/\.[^/.]+$/, "")}.xlsx`)
+  }
+
   // Widget drag handling
   useEffect(() => {
     if (!dragState) return
@@ -468,6 +521,8 @@ export function AgentDashboard() {
       startY: event.clientY,
       startWidth: widget.width,
       startHeight: widget.height,
+      startWidgetX: widget.x,
+      startWidgetY: widget.y,
       corner,
     })
   }
@@ -488,8 +543,8 @@ export function AgentDashboard() {
 
           let newWidth = resizeState.startWidth
           let newHeight = resizeState.startHeight
-          let newX = widget.x
-          let newY = widget.y
+          let newX = resizeState.startWidgetX
+          let newY = resizeState.startWidgetY
 
           // Handle horizontal resize based on corner
           if (resizeState.corner === "se" || resizeState.corner === "ne") {
@@ -498,7 +553,10 @@ export function AgentDashboard() {
             // sw or nw - resize from left edge
             newWidth = Math.max(MIN_WIDTH, resizeState.startWidth - deltaX)
             if (newWidth > MIN_WIDTH) {
-              newX = widget.x + (resizeState.startWidth - newWidth)
+              newX = Math.max(0, resizeState.startWidgetX + (resizeState.startWidth - newWidth))
+            } else {
+              // Reached min width, cap the X position movement
+              newX = Math.max(0, resizeState.startWidgetX + (resizeState.startWidth - MIN_WIDTH))
             }
           }
 
@@ -509,7 +567,10 @@ export function AgentDashboard() {
             // ne or nw - resize from top edge
             newHeight = Math.max(MIN_HEIGHT, resizeState.startHeight - deltaY)
             if (newHeight > MIN_HEIGHT) {
-              newY = widget.y + (resizeState.startHeight - newHeight)
+              newY = Math.max(0, resizeState.startWidgetY + (resizeState.startHeight - newHeight))
+            } else {
+              // Reached min height, cap the Y position movement
+              newY = Math.max(0, resizeState.startWidgetY + (resizeState.startHeight - MIN_HEIGHT))
             }
           }
 
@@ -640,6 +701,15 @@ export function AgentDashboard() {
         throw new Error("No result received from agent")
       }
 
+      setQueryCount((prev) => prev + 1)
+      if (finalPayload.token_usage) {
+        setTotalTokens((prev) => ({
+          prompt: prev.prompt + (finalPayload.token_usage?.prompt_tokens || 0),
+          completion: prev.completion + (finalPayload.token_usage?.completion_tokens || 0),
+          total: prev.total + (finalPayload.token_usage?.total_tokens || 0),
+        }))
+      }
+
       // Only update table data when the backend signals a real mutation
       if (finalPayload.mutation && finalPayload.rows) {
         setRows(finalPayload.rows)
@@ -688,6 +758,7 @@ export function AgentDashboard() {
           role: "assistant",
           content: finalPayload.assistant_reply ?? "Done.",
           code: finalPayload.code,
+          query_output: finalPayload.query_output,
         },
       ])
     } catch (agentError) {
@@ -756,8 +827,8 @@ export function AgentDashboard() {
             </button>
           </div>
 
-          {/* File upload */}
-          <div className="p-2">
+          {/* File upload & download */}
+          <div className="p-2 space-y-2">
             <label
               className={`group flex cursor-pointer items-center gap-2.5 rounded-lg border border-dashed border-border p-2.5 text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground hover:bg-accent/50 ${
                 sidebarCollapsed ? "justify-center" : ""
@@ -774,6 +845,20 @@ export function AgentDashboard() {
                 onChange={handleFileUpload}
               />
             </label>
+
+            <button
+              onClick={handleDownloadExcel}
+              disabled={rows.length === 0}
+              className={`w-full group flex items-center gap-2.5 rounded-lg border border-dashed border-border p-2.5 text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground hover:bg-accent/50 disabled:opacity-50 disabled:cursor-not-allowed ${
+                sidebarCollapsed ? "justify-center" : ""
+              }`}
+              title="Download modified data"
+            >
+              <Download className="size-4 shrink-0" />
+              {!sidebarCollapsed && (
+                <span className="text-xs font-medium truncate">Download Excel</span>
+              )}
+            </button>
           </div>
 
           {/* Active file */}
@@ -799,6 +884,47 @@ export function AgentDashboard() {
             )}
             {transformationSteps.map((step, idx) => {
               const Icon = step.icon
+              if (step.isContextButton) {
+                return (
+                  <div key={step.label} className="flex flex-col">
+                    <button
+                      onClick={() => setIsContextOpen(!isContextOpen)}
+                      className={`flex items-center w-full gap-2.5 rounded-md px-2.5 py-2 text-xs transition-colors ${
+                        sidebarCollapsed ? "justify-center" : ""
+                      } text-muted-foreground hover:bg-accent hover:text-foreground`}
+                      title={step.label}
+                    >
+                      <Icon className="size-3.5 shrink-0" />
+                      {!sidebarCollapsed && (
+                        <div className="flex flex-1 items-center justify-between">
+                          <span className="font-medium">{step.label}</span>
+                          {isContextOpen ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
+                        </div>
+                      )}
+                    </button>
+                    {!sidebarCollapsed && isContextOpen && (                      
+                      <div className="space-y-1.5 flex flex-col text-xs text-muted-foreground ml-2 mt-1">
+                        <div className="flex justify-between items-center bg-secondary/50 px-2 py-1.5 rounded">
+                          <span>Queries:</span>
+                          <span className="font-medium text-foreground">{queryCount}</span>
+                        </div>
+                        <div className="flex justify-between items-center bg-secondary/50 px-2 py-1.5 rounded">
+                          <span>Prompt:</span>
+                          <span className="font-medium text-foreground">{totalTokens.prompt.toLocaleString()}</span>
+                        </div>
+                        <div className="flex justify-between items-center bg-secondary/50 px-2 py-1.5 rounded">
+                          <span>Completion:</span>
+                          <span className="font-medium text-foreground">{totalTokens.completion.toLocaleString()}</span>
+                        </div>
+                        <div className="flex justify-between items-center bg-primary/10 text-primary px-2 py-1.5 rounded">
+                          <span className="font-semibold">Total Tokens:</span>
+                          <span className="font-bold">{totalTokens.total.toLocaleString()}</span>
+                        </div>
+                      </div>                      
+                    )}
+                  </div>
+                )
+              }
               return (
                 <div
                   key={step.label}
@@ -892,15 +1018,30 @@ export function AgentDashboard() {
                     setScrollTop(target.scrollTop)
                   }}
                 >
-                  <Table className="w-max min-w-full">
+                  <Table className="table-fixed" style={{ width: typeof totalTableWidth === "number" ? `max(100%, ${totalTableWidth}px)` : totalTableWidth }}>
                     <TableHeader>
                       <TableRow className="border-b-border hover:bg-transparent">
                         {headers.map((header) => (
                           <TableHead
                             key={header}
-                            className="sticky top-0 z-10 h-8 bg-card/95 backdrop-blur px-3 text-[11px] font-semibold text-muted-foreground whitespace-nowrap"
+                            style={{ width: colWidths[header] || 150 }}
+                            className="sticky top-0 z-10 h-8 bg-card/95 backdrop-blur px-3 text-[11px] font-semibold text-muted-foreground truncate group"
                           >
                             {header}
+                            {/* Resizer handle */}
+                            <div
+                              className="absolute top-0 right-0 w-1.5 h-full cursor-col-resize opacity-0 group-hover:opacity-100 hover:opacity-100 hover:bg-primary/50 transition-opacity"
+                              onMouseDown={(e) => {
+                                e.stopPropagation()
+                                e.preventDefault()
+                                resizingCol.current = {
+                                  key: header,
+                                  startX: e.clientX,
+                                  startWidth: colWidths[header] || 150,
+                                }
+                                document.body.style.cursor = "col-resize"
+                              }}
+                            />
                           </TableHead>
                         ))}
                       </TableRow>
@@ -928,7 +1069,7 @@ export function AgentDashboard() {
                             {headers.map((header) => (
                               <TableCell
                                 key={`${idx}-${header}`}
-                                className={`px-3 py-1.5 text-xs whitespace-nowrap ${
+                                className={`px-3 py-1.5 text-xs truncate ${
                                   isHighlighted ? "text-foreground font-medium" : "text-foreground/80"
                                 }`}
                               >
@@ -1134,9 +1275,21 @@ export function AgentDashboard() {
                         {expandedCodeIndex === index ? "Hide code" : "View code"}
                       </button>
                       {expandedCodeIndex === index && (
-                        <pre className="mt-1.5 w-full overflow-x-auto rounded-lg bg-[oklch(0.1_0_0)] p-2.5 text-[11px] font-mono text-[oklch(0.7_0_0)] border border-border whitespace-pre">
-                          {message.code}
-                        </pre>
+                        <div className="mt-1.5 w-full space-y-2">
+                          <pre className="w-full overflow-x-auto rounded-lg bg-[oklch(0.1_0_0)] p-2.5 text-[11px] font-mono text-[oklch(0.7_0_0)] border border-border whitespace-pre">
+                            {message.code}
+                          </pre>
+                          {message.query_output && (
+                            <div className="rounded-lg border border-border bg-card">
+                              <div className="px-2.5 py-1.5 border-b border-border bg-muted/50 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
+                                Stdout
+                              </div>
+                              <pre className="w-full overflow-x-auto p-2.5 text-[11px] font-mono text-foreground whitespace-pre">
+                                {message.query_output}
+                              </pre>
+                            </div>
+                          )}
+                        </div>
                       )}
                     </div>
                   )}
@@ -1191,8 +1344,14 @@ export function AgentDashboard() {
 
             {/* Error */}
             {error && (
-              <div className="mx-3 mb-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-                {error}
+              <div className="mx-3 mb-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive flex justify-between items-center">
+                <span>Error occurred</span>
+                <button
+                   onClick={() => setError(null)}
+                   className="text-destructive hover:text-destructive/80 transition-colors"
+                >
+                  <X className="size-3.5" />
+                </button>
               </div>
             )}
 

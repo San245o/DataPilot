@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 
 from schemas import AgentRequest, AgentResponse
 from workflow import build_workflow
-from agent import generate_code
+from agent import generate_code, draft_final_reply
 from sandbox import run_sandboxed
 
 load_dotenv()
@@ -60,6 +60,7 @@ def execute_agent(payload: AgentRequest) -> AgentResponse:
             },
             mutation=final_state.get("mutation", False),
             highlight_indices=final_state.get("highlight_indices", []),
+            token_usage=final_state.get("token_usage"),
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -99,18 +100,36 @@ async def _stream_agent_execution(payload: AgentRequest) -> AsyncGenerator[str, 
         
         # Step 4: Prepare response
         yield emit("step", {"id": "prepare", "status": "active"})
+        
+        final_output = draft_final_reply(
+            prompt=payload.prompt,
+            model_name=payload.model,
+            query_output=result.query_output,
+            initial_reply=generated["assistant_reply"],
+        )
+        
+        final_reply = final_output.get("reply", generated["assistant_reply"])
+        gen_usage = generated.get("token_usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+        draft_usage = final_output.get("token_usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+        merged_usage = {
+            "prompt_tokens": gen_usage.get("prompt_tokens", 0) + draft_usage.get("prompt_tokens", 0),
+            "completion_tokens": gen_usage.get("completion_tokens", 0) + draft_usage.get("completion_tokens", 0),
+            "total_tokens": gen_usage.get("total_tokens", 0) + draft_usage.get("total_tokens", 0),
+        }
+        
         response = AgentResponse(
             rows=result.rows,
             visualization=result.visualization,
             query_output=result.query_output,
             code=generated["code"],
-            assistant_reply=generated["assistant_reply"],
+            assistant_reply=final_reply,
             context_preview={
                 "columns": columns,
                 "sample_rows": sample_rows,
             },
             mutation=result.mutation,
             highlight_indices=result.highlight_indices,
+            token_usage=merged_usage,
         )
         yield emit("step", {"id": "prepare", "status": "done"})
         

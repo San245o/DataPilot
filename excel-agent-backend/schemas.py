@@ -15,6 +15,12 @@ class AgentRequest(BaseModel):
     history: list[ChatMessage] = Field(default_factory=list)
 
 
+class TokenUsage(BaseModel):
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+
 class AgentResponse(BaseModel):
     rows: list[dict[str, Any]]
     visualization: dict[str, Any] | None = None
@@ -24,6 +30,7 @@ class AgentResponse(BaseModel):
     context_preview: dict[str, Any]
     mutation: bool = False
     highlight_indices: list[int] = Field(default_factory=list)
+    token_usage: TokenUsage | None = None
 
 
 class StreamEvent(BaseModel):
