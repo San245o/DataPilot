@@ -158,11 +158,23 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
         if _contains_plotly_figure(message):
             query_logs.append("[Plotly Figure - see visualization]")
         elif isinstance(message, pd.DataFrame):
-            query_logs.append(message.head(50).to_string())
-            query_table_rows = _sanitize_for_json(message.head(50).to_dict(orient="records"))
+            df_len = len(message)
+            msg = f"[DataFrame: {df_len} rows, {len(message.columns)} columns]"
+            if df_len > 10:
+                msg += f"\nShowing first 10 rows:\n{message.head(10).to_string()}"
+            else:
+                msg += f"\n{message.to_string()}"
+            query_logs.append(msg)
+            query_table_rows = _sanitize_for_json(message.to_dict(orient="records"))
         elif isinstance(message, pd.Series):
-            query_logs.append(message.head(50).to_string())
-            series_df = message.head(50).to_frame(name=message.name or "value").reset_index()
+            s_len = len(message)
+            msg = f"[Series: {s_len} items]"
+            if s_len > 10:
+                msg += f"\nShowing first 10 items:\n{message.head(10).to_string()}"
+            else:
+                msg += f"\n{message.to_string()}"
+            query_logs.append(msg)
+            series_df = message.to_frame(name=message.name or "value").reset_index()
             query_table_rows = _sanitize_for_json(series_df.to_dict(orient="records"))
         else:
             s = str(message)
@@ -177,11 +189,17 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
             if _contains_plotly_figure(a):
                 parts.append("[Plotly Figure - see visualization]")
             elif isinstance(a, pd.DataFrame):
-                parts.append(a.head(20).to_string())
-                query_table_rows = _sanitize_for_json(a.head(50).to_dict(orient="records"))
+                df_len = len(a)
+                msg = f"[DataFrame: {df_len} rows]\n"
+                msg += a.head(10).to_string() if df_len > 10 else a.to_string()
+                parts.append(msg)
+                query_table_rows = _sanitize_for_json(a.to_dict(orient="records"))
             elif isinstance(a, pd.Series):
-                parts.append(a.head(20).to_string())
-                series_df = a.head(50).to_frame(name=a.name or "value").reset_index()
+                s_len = len(a)
+                msg = f"[Series: {s_len} items]\n"
+                msg += a.head(10).to_string() if s_len > 10 else a.to_string()
+                parts.append(msg)
+                series_df = a.to_frame(name=a.name or "value").reset_index()
                 query_table_rows = _sanitize_for_json(series_df.to_dict(orient="records"))
             else:
                 s = str(a)
@@ -193,23 +211,36 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
 
     def highlight_rows(indices: list[int]) -> None:
         highlight_idx.clear()
+        # Always output all indices, never truncate highlighting
         highlight_idx.extend(indices)
 
-    def print_query(query_expr: str, max_rows: int = 20) -> pd.DataFrame:
+    def print_query(query_expr: str, max_rows: int = 10) -> pd.DataFrame:
         nonlocal query_table_rows
         current_df = _get_df()
         queried_df = current_df.query(query_expr, engine="python")
         highlight_idx.clear()
-        highlight_idx.extend(queried_df.index.tolist()[:max_rows])
-        query_logs.append(queried_df.head(max_rows).to_string(index=False))
-        query_table_rows = _sanitize_for_json(queried_df.head(max_rows).to_dict(orient="records"))
+        highlight_idx.extend(queried_df.index.tolist())
+        df_len = len(queried_df)
+        msg = f"Found {df_len} matching rows."
+        if df_len > max_rows:
+            msg += f"\nShowing first {max_rows} rows:\n{queried_df.head(max_rows).to_string(index=False)}"
+        else:
+            msg += f"\n{queried_df.to_string(index=False)}"
+        query_logs.append(msg)
+        query_table_rows = _sanitize_for_json(queried_df.to_dict(orient="records"))
         return queried_df
 
-    def print_table(max_rows: int = 20) -> pd.DataFrame:
+    def print_table(max_rows: int = 10) -> pd.DataFrame:
         nonlocal query_table_rows
         current_df = _get_df()
-        query_logs.append(current_df.head(max_rows).to_string(index=False))
-        query_table_rows = _sanitize_for_json(current_df.head(max_rows).to_dict(orient="records"))
+        df_len = len(current_df)
+        msg = f"[DataFrame: {df_len} rows total]"
+        if df_len > max_rows:
+            msg += f"\nShowing first {max_rows} rows:\n{current_df.head(max_rows).to_string(index=False)}"
+        else:
+            msg += f"\n{current_df.to_string(index=False)}"
+        query_logs.append(msg)
+        query_table_rows = _sanitize_for_json(current_df.to_dict(orient="records"))
         return current_df
 
     def add_column(name: str, default: Any = None) -> pd.DataFrame:

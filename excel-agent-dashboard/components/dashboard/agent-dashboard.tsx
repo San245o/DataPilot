@@ -1048,8 +1048,9 @@ export function AgentDashboard() {
               >
                 <option value="gemini-3-flash-preview">Gemini 3 Flash</option>
                 <option value="gemini-3.1-flash-lite-preview">Gemini 3.1 Flash Lite</option>
-                <option value="openai/gpt-4.1">GPT 4.1 (GitHub Models)</option>
+                <option value="gpt-4o">GPT-4o (GitHub Models)</option>
                 <option value="minimaxai/minimax-m2.5">Minimax m2.5</option>
+                <option value="google/codegemma-7b">CodeGemma 7B (NVIDIA)</option>
               </select>
             </div>
           )}
@@ -1480,16 +1481,7 @@ export function AgentDashboard() {
                           <pre className="w-full overflow-x-auto rounded-lg bg-[oklch(0.1_0_0)] p-2.5 text-[11px] font-mono text-[oklch(0.7_0_0)] border border-border whitespace-pre">
                             {message.code}
                           </pre>
-                          {message.query_output && (
-                            <div className="rounded-lg border border-border bg-card">
-                              <div className="px-2.5 py-1.5 border-b border-border bg-muted/50 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
-                                Stdout
-                              </div>
-                              <pre className="w-full overflow-x-auto p-2.5 text-[11px] font-mono text-foreground whitespace-pre">
-                                {message.query_output}
-                              </pre>
-                            </div>
-                          )}
+                          
                         </div>
                       )}
                     </div>

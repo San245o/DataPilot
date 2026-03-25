@@ -11,3 +11,4 @@ python-dotenv==1.1.1
 azure-ai-inference
 azure-core
 langchain-nvidia-ai-endpoints
+openai
