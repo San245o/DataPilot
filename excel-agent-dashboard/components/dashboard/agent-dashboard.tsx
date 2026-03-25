@@ -8,7 +8,6 @@ import {
   ChevronLeft,
   ChevronRight,
   Code,
-  Database,
   FileSpreadsheet,
   Layers,
   Loader2,
@@ -37,10 +36,16 @@ type ContextPreview = {
   columns?: string[]
   sample_rows?: SheetRow[]
 }
+type QueryTablePayload = {
+  id: string
+  title: string
+  rows: SheetRow[]
+}
 type AgentExecuteResponse = {
   rows?: SheetRow[]
   visualization?: VisualizationPayload | null
   query_output?: string | null
+  query_tables?: QueryTablePayload[]
   code?: string
   assistant_reply?: string
   context_preview?: ContextPreview
@@ -58,6 +63,7 @@ type ChatMessage = {
   content: string
   code?: string
   query_output?: string | null
+  table_links?: Array<{ id: string; title: string }>
 }
 type VizWidget = {
   id: string
@@ -69,6 +75,12 @@ type VizWidget = {
   width: number
   height: number
   zIndex: number
+}
+type PivotTableTab = {
+  id: string
+  title: string
+  rows: SheetRow[]
+  open: boolean
 }
 type DragState = {
   id: string
@@ -227,6 +239,9 @@ export function AgentDashboard() {
   const [thinkingSteps, setThinkingSteps] = useState<ThinkingStep[]>([])
   const [expandedCodeIndex, setExpandedCodeIndex] = useState<number | null>(null)
   const [chartMenuOpen, setChartMenuOpen] = useState(false)
+  const [pivotMenuOpen, setPivotMenuOpen] = useState(false)
+  const [pivotTables, setPivotTables] = useState<PivotTableTab[]>([])
+  const [activeDataTab, setActiveDataTab] = useState<string>("base")
   const [isContextOpen, setIsContextOpen] = useState(false)
   const [totalTokens, setTotalTokens] = useState({ prompt: 0, completion: 0, total: 0 })
   const [queryCount, setQueryCount] = useState(0)
@@ -242,7 +257,13 @@ export function AgentDashboard() {
   const splitContainerRef = useRef<HTMLDivElement | null>(null)
   const tableContainerRef = useRef<HTMLDivElement | null>(null)
   const mainContentRef = useRef<HTMLDivElement | null>(null)
-  const headers = useMemo(() => Object.keys(rows[0] ?? {}), [rows])
+  const activePivotTable = useMemo(
+    () => pivotTables.find((table) => table.id === activeDataTab && table.open),
+    [pivotTables, activeDataTab]
+  )
+  const isBaseDataTab = activeDataTab === "base" || !activePivotTable
+  const tableRows = isBaseDataTab ? rows : (activePivotTable?.rows ?? rows)
+  const headers = useMemo(() => Object.keys(tableRows[0] ?? {}), [tableRows])
 
   // Virtualization state
   const [scrollTop, setScrollTop] = useState(0)
@@ -260,8 +281,9 @@ export function AgentDashboard() {
 
   // Convert highlighted rows set to sorted array for navigation
   const highlightedRowsArray = useMemo(() => {
+    if (!isBaseDataTab) return []
     return Array.from(highlightedRows).sort((a, b) => a - b)
-  }, [highlightedRows])
+  }, [highlightedRows, isBaseDataTab])
   
   const [currentHighlightIndex, setCurrentHighlightIndex] = useState(0)
 
@@ -269,16 +291,16 @@ export function AgentDashboard() {
   const virtualizedData = useMemo(() => {
     const startIndex = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN)
     const visibleCount = Math.ceil(tableHeight / ROW_HEIGHT) + OVERSCAN * 2
-    const endIndex = Math.min(rows.length, startIndex + visibleCount)
+    const endIndex = Math.min(tableRows.length, startIndex + visibleCount)
     
     return {
       startIndex,
       endIndex,
-      visibleRows: rows.slice(startIndex, endIndex),
-      totalHeight: rows.length * ROW_HEIGHT,
+      visibleRows: tableRows.slice(startIndex, endIndex),
+      totalHeight: tableRows.length * ROW_HEIGHT,
       offsetTop: startIndex * ROW_HEIGHT
     }
-  }, [rows, scrollTop, tableHeight])
+  }, [tableRows, scrollTop, tableHeight])
 
   // Reset highlight index when highlighted rows change
   useEffect(() => {
@@ -342,18 +364,26 @@ export function AgentDashboard() {
     }
   }, [highlightedRowsArray, currentHighlightIndex, tableHeight])
 
+  const closePivotTab = useCallback((pivotId: string) => {
+    setPivotTables((prev) => prev.map((tab) => (tab.id === pivotId ? { ...tab, open: false } : tab)))
+    setActiveDataTab((prev) => (prev === pivotId ? "base" : prev))
+  }, [])
+
   // Auto-scroll chat
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" })
   }, [chatMessages])
 
-  // Close chart menu when clicking outside
+  // Close dropdown menus when clicking outside
   useEffect(() => {
-    if (!chartMenuOpen) return
-    const handleClickOutside = () => setChartMenuOpen(false)
+    if (!chartMenuOpen && !pivotMenuOpen) return
+    const handleClickOutside = () => {
+      setChartMenuOpen(false)
+      setPivotMenuOpen(false)
+    }
     document.addEventListener("click", handleClickOutside)
     return () => document.removeEventListener("click", handleClickOutside)
-  }, [chartMenuOpen])
+  }, [chartMenuOpen, pivotMenuOpen])
 
   // Dark mode toggle
   const toggleTheme = useCallback(() => {
@@ -435,6 +465,8 @@ export function AgentDashboard() {
         setRows(normalizeRows(parsedRows))
         setDatasetName(file.name)
         setWidgets([])
+        setPivotTables([])
+        setActiveDataTab("base")
         setHighlightedRows(new Set())
       }
       return
@@ -451,6 +483,8 @@ export function AgentDashboard() {
       setRows(normalizeRows(parsedRows))
       setDatasetName(file.name)
       setWidgets([])
+      setPivotTables([])
+      setActiveDataTab("base")
       setHighlightedRows(new Set())
     }
   }
@@ -687,7 +721,7 @@ export function AgentDashboard() {
               } else if (event === "error") {
                 throw new Error(data.message)
               }
-            } catch (parseError) {
+            } catch {
               // Ignore parse errors for incomplete chunks
             }
           }
@@ -710,9 +744,66 @@ export function AgentDashboard() {
         }))
       }
 
-      // Only update table data when the backend signals a real mutation
-      if (finalPayload.mutation && finalPayload.rows) {
-        setRows(finalPayload.rows)
+      const nextRows = Array.isArray(finalPayload.rows)
+        ? normalizeRows(finalPayload.rows as Record<string, unknown>[])
+        : []
+      const responseTables = Array.isArray(finalPayload.query_tables) ? finalPayload.query_tables : []
+      const currentColumns = Object.keys(rows[0] ?? {})
+      const nextColumns = Object.keys(nextRows[0] ?? {})
+      const addedColumns = nextColumns.filter((col) => !currentColumns.includes(col))
+      const removedColumns = currentColumns.filter((col) => !nextColumns.includes(col))
+      const rowDelta = nextRows.length - rows.length
+      const hasSchemaChange =
+        Boolean(finalPayload.mutation) &&
+        nextRows.length > 0 &&
+        (addedColumns.length > 0 || removedColumns.length > 0)
+      const hasRowCountChange = Boolean(finalPayload.mutation) && rowDelta !== 0
+      const shouldCreateSeparateTable = hasSchemaChange || hasRowCountChange
+
+      let createdTableLink: { id: string; title: string } | null = null
+
+      if (responseTables.length > 0) {
+        const normalizedTables = responseTables.map((table) => ({
+          id: table.id,
+          title: table.title,
+          rows: normalizeRows(table.rows as Record<string, unknown>[]),
+          open: true,
+        }))
+
+        setPivotTables((prev) => {
+          const byId = new Map(prev.map((item) => [item.id, item]))
+          normalizedTables.forEach((table) => {
+            byId.set(table.id, table)
+          })
+          return Array.from(byId.values())
+        })
+        setActiveDataTab(normalizedTables[0].id)
+      }
+
+      if (shouldCreateSeparateTable) {
+        const pivotId = `${Date.now()}-${Math.floor(Math.random() * 100000)}`
+        const changeParts: string[] = []
+        if (addedColumns.length > 0) changeParts.push(`+cols ${addedColumns.join(", ")}`)
+        if (removedColumns.length > 0) changeParts.push(`-cols ${removedColumns.join(", ")}`)
+        if (rowDelta > 0) changeParts.push(`+${rowDelta} rows`)
+        if (rowDelta < 0) changeParts.push(`${rowDelta} rows`)
+        const pivotTitle = `Separated ${pivotTables.length + 1}: ${changeParts.join(" | ")}`
+
+        setPivotTables((prev) => [
+          ...prev,
+          {
+            id: pivotId,
+            title: pivotTitle,
+            rows: nextRows,
+            open: true,
+          },
+        ])
+        setActiveDataTab(pivotId)
+        createdTableLink = { id: pivotId, title: pivotTitle }
+      } else if (finalPayload.mutation && nextRows.length > 0) {
+        // Mutations without schema/row-count changes update base data directly.
+        setRows(nextRows)
+        setActiveDataTab("base")
       }
 
       // Highlight matching rows (works for both queries and mutations)
@@ -759,6 +850,10 @@ export function AgentDashboard() {
           content: finalPayload.assistant_reply ?? "Done.",
           code: finalPayload.code,
           query_output: finalPayload.query_output,
+          table_links: [
+            ...responseTables.map((table) => ({ id: table.id, title: table.title })),
+            ...(createdTableLink ? [createdTableLink] : []),
+          ],
         },
       ])
     } catch (agentError) {
@@ -954,6 +1049,7 @@ export function AgentDashboard() {
                 <option value="gemini-3-flash-preview">Gemini 3 Flash</option>
                 <option value="gemini-3.1-flash-lite-preview">Gemini 3.1 Flash Lite</option>
                 <option value="openai/gpt-4.1">GPT 4.1 (GitHub Models)</option>
+                <option value="minimaxai/minimax-m2.5">Minimax m2.5</option>
               </select>
             </div>
           )}
@@ -971,10 +1067,94 @@ export function AgentDashboard() {
               style={fullscreenPanel === "data" ? {} : { height: `calc(${splitRatio * 100}% - 2px)` }}
             >
               <div className="flex items-center justify-between h-10 px-4 border-b border-border bg-card/30 shrink-0">
-                <span className="text-xs font-semibold text-foreground">Data</span>
+                <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-semibold text-foreground">
+                      {isBaseDataTab ? "Data" : activePivotTable?.title || "Data"}
+                    </span>
+                    {!isBaseDataTab && activePivotTable && (
+                      <button
+                        type="button"
+                        onClick={() => closePivotTab(activePivotTable.id)}
+                        className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+                        title="Close pivot table"
+                      >
+                        <X className="size-3" />
+                      </button>
+                    )}
+                  </div>
+                  {pivotTables.length > 0 && (
+                    <div className="relative">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setPivotMenuOpen((prev) => !prev)
+                        }}
+                        className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-medium text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+                      >
+                        <span>{pivotTables.length} pivot{pivotTables.length !== 1 ? "s" : ""}</span>
+                        <ChevronDown className={`size-3 transition-transform ${pivotMenuOpen ? "rotate-180" : ""}`} />
+                      </button>
+                      {pivotMenuOpen && (
+                        <div
+                          className="absolute top-full left-0 mt-1 min-w-[220px] rounded-lg border border-border bg-card shadow-lg py-1 z-50"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setActiveDataTab("base")
+                              setPivotMenuOpen(false)
+                            }}
+                            className={`w-full text-left px-3 py-1.5 text-xs transition-colors ${
+                              isBaseDataTab ? "text-primary bg-primary/10" : "text-foreground hover:bg-accent"
+                            }`}
+                          >
+                            Base Data
+                          </button>
+                          {pivotTables.map((pivot) => (
+                            <div key={pivot.id} className="flex items-center">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (!pivot.open) {
+                                    setPivotTables((prev) =>
+                                      prev.map((tab) => (tab.id === pivot.id ? { ...tab, open: true } : tab))
+                                    )
+                                  }
+                                  setActiveDataTab(pivot.id)
+                                  setPivotMenuOpen(false)
+                                }}
+                                className={`flex-1 text-left px-3 py-1.5 text-xs transition-colors ${
+                                  activeDataTab === pivot.id
+                                    ? "text-primary bg-primary/10"
+                                    : "text-foreground hover:bg-accent"
+                                }`}
+                              >
+                                {pivot.title}
+                                {!pivot.open ? " (closed)" : ""}
+                              </button>
+                              {pivot.open && (
+                                <button
+                                  type="button"
+                                  onClick={() => closePivotTab(pivot.id)}
+                                  className="mr-1 flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+                                  title="Close pivot table"
+                                >
+                                  <X className="size-3" />
+                                </button>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
                 <div className="flex items-center gap-2">
                   {/* Highlighted row navigation */}
-                  {highlightedRowsArray.length > 0 && (
+                  {isBaseDataTab && highlightedRowsArray.length > 0 && (
                     <div className="flex items-center gap-1 mr-2">
                       <button
                         type="button"
@@ -1052,7 +1232,7 @@ export function AgentDashboard() {
                       )}
                       {virtualizedData.visibleRows.map((row, localIdx) => {
                         const idx = virtualizedData.startIndex + localIdx
-                        const isHighlighted = highlightedRows.has(idx)
+                        const isHighlighted = isBaseDataTab && highlightedRows.has(idx)
                         const isCurrentHighlight = highlightedRowsArray.length > 0 && highlightedRowsArray[currentHighlightIndex] === idx
                         return (
                           <TableRow
@@ -1079,8 +1259,8 @@ export function AgentDashboard() {
                           </TableRow>
                         )
                       })}
-                      {virtualizedData.endIndex < rows.length && (
-                        <tr style={{ height: (rows.length - virtualizedData.endIndex) * ROW_HEIGHT }} />
+                      {virtualizedData.endIndex < tableRows.length && (
+                        <tr style={{ height: (tableRows.length - virtualizedData.endIndex) * ROW_HEIGHT }} />
                       )}
                     </TableBody>
                   </Table>
@@ -1258,6 +1438,27 @@ export function AgentDashboard() {
                     {message.role === "assistant"
                       ? renderSimpleMarkdown(message.content)
                       : message.content}
+                    {message.role === "assistant" && Array.isArray(message.table_links) && message.table_links.length > 0 && (
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        {message.table_links.map((tableLink) => (
+                          <button
+                            key={`${index}-${tableLink.id}`}
+                            type="button"
+                            onClick={() => {
+                              setPivotTables((prev) =>
+                                prev.map((tab) => (tab.id === tableLink.id ? { ...tab, open: true } : tab))
+                              )
+                              setActiveDataTab(tableLink.id)
+                            }}
+                            className="inline-flex items-center gap-1 rounded-md border border-border bg-card px-2 py-1 text-[10px] font-medium text-foreground hover:bg-accent transition-colors"
+                            title="Open table in Data region"
+                          >
+                            <span>Open table:</span>
+                            <span className="text-primary">{tableLink.title}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
                   {/* Code toggle button - only for assistant messages with code */}
                   {message.role === "assistant" && message.code && (

@@ -76,6 +76,13 @@ FORBIDDEN_NAMES = {
     "breakpoint",
 }
 
+FORBIDDEN_ATTR_CALLS = {
+    "show",
+    "to_html",
+    "write_html",
+    "to_json",
+}
+
 
 class SandboxViolation(Exception):
     pass
@@ -86,6 +93,7 @@ class SandboxResult:
     rows: list[dict[str, Any]]
     visualization: dict[str, Any] | None
     query_output: str | None
+    query_table_rows: list[dict[str, Any]] | None
     mutation: bool = False
     highlight_indices: list[int] = field(default_factory=list)
 
@@ -103,6 +111,12 @@ def _validate_code(code: str) -> None:
             raise SandboxViolation(f"Dunder access is not allowed: {node.attr}")
         if isinstance(node, ast.Name) and node.id in FORBIDDEN_NAMES:
             raise SandboxViolation(f"Forbidden identifier: {node.id}")
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            attr_name = node.func.attr
+            if attr_name in FORBIDDEN_ATTR_CALLS:
+                raise SandboxViolation(
+                    f"Calling '{attr_name}()' is not allowed. Assign chart to 'fig' and let the UI render it."
+                )
 
 
 def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -112,10 +126,20 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
     df.replace("", np.nan, inplace=True)
     original_df = df.copy()
     query_logs: list[str] = []
+    query_table_rows: list[dict[str, Any]] | None = None
     mutation_flag: list[bool] = [False]
     highlight_idx: list[int] = []
 
     env: dict[str, Any] = {}
+
+    def _contains_plotly_figure(value: Any) -> bool:
+        if hasattr(value, "to_plotly_json"):
+            return True
+        if isinstance(value, dict):
+            return any(_contains_plotly_figure(v) for v in value.values())
+        if isinstance(value, (list, tuple, set)):
+            return any(_contains_plotly_figure(v) for v in value)
+        return False
 
     def _get_df() -> pd.DataFrame:
         current_df = env.get("df")
@@ -129,13 +153,17 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
         return updated_df
 
     def log_output(message: Any) -> None:
+        nonlocal query_table_rows
         # Don't stringify plotly figures - they produce massive JSON
-        if hasattr(message, 'to_plotly_json'):
+        if _contains_plotly_figure(message):
             query_logs.append("[Plotly Figure - see visualization]")
         elif isinstance(message, pd.DataFrame):
             query_logs.append(message.head(50).to_string())
+            query_table_rows = _sanitize_for_json(message.head(50).to_dict(orient="records"))
         elif isinstance(message, pd.Series):
             query_logs.append(message.head(50).to_string())
+            series_df = message.head(50).to_frame(name=message.name or "value").reset_index()
+            query_table_rows = _sanitize_for_json(series_df.to_dict(orient="records"))
         else:
             s = str(message)
             if len(s) > 5000:
@@ -143,14 +171,18 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
             query_logs.append(s)
 
     def safe_print(*args: Any, **kwargs: Any) -> None:
+        nonlocal query_table_rows
         parts = []
         for a in args:
-            if hasattr(a, 'to_plotly_json'):
+            if _contains_plotly_figure(a):
                 parts.append("[Plotly Figure - see visualization]")
             elif isinstance(a, pd.DataFrame):
                 parts.append(a.head(20).to_string())
+                query_table_rows = _sanitize_for_json(a.head(50).to_dict(orient="records"))
             elif isinstance(a, pd.Series):
                 parts.append(a.head(20).to_string())
+                series_df = a.head(50).to_frame(name=a.name or "value").reset_index()
+                query_table_rows = _sanitize_for_json(series_df.to_dict(orient="records"))
             else:
                 s = str(a)
                 if len(s) > 5000:
@@ -164,16 +196,20 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
         highlight_idx.extend(indices)
 
     def print_query(query_expr: str, max_rows: int = 20) -> pd.DataFrame:
+        nonlocal query_table_rows
         current_df = _get_df()
         queried_df = current_df.query(query_expr, engine="python")
         highlight_idx.clear()
         highlight_idx.extend(queried_df.index.tolist()[:max_rows])
         query_logs.append(queried_df.head(max_rows).to_string(index=False))
+        query_table_rows = _sanitize_for_json(queried_df.head(max_rows).to_dict(orient="records"))
         return queried_df
 
     def print_table(max_rows: int = 20) -> pd.DataFrame:
+        nonlocal query_table_rows
         current_df = _get_df()
         query_logs.append(current_df.head(max_rows).to_string(index=False))
+        query_table_rows = _sanitize_for_json(current_df.head(max_rows).to_dict(orient="records"))
         return current_df
 
     def add_column(name: str, default: Any = None) -> pd.DataFrame:
@@ -335,6 +371,7 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
         "rows": _sanitize_for_json(result_df.to_dict(orient="records")),
         "visualization": visualization,
         "query_output": query_output,
+        "query_table_rows": query_table_rows,
         "mutation": mutation_flag[0],
         "highlight_indices": highlight_idx,
     }
@@ -372,6 +409,7 @@ def run_sandboxed(code: str, rows: list[dict[str, Any]], timeout_seconds: int = 
         rows=result_container["rows"],
         visualization=result_container.get("visualization"),
         query_output=result_container.get("query_output"),
+        query_table_rows=result_container.get("query_table_rows"),
         mutation=result_container.get("mutation", False),
         highlight_indices=result_container.get("highlight_indices", []),
     )

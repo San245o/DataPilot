@@ -3,6 +3,7 @@ from __future__ import annotations
 import random
 import traceback
 from typing import Any, Literal, TypedDict
+from uuid import uuid4
 
 from langgraph.graph import END, StateGraph
 
@@ -33,6 +34,9 @@ class AgentState(TypedDict, total=False):
     mutation: bool
     highlight_indices: list[int]
     token_usage: dict[str, int]
+    table_request: dict[str, Any]
+    query_table_rows: list[dict[str, Any]] | None
+    query_tables: list[dict[str, Any]]
     error: str | None
     retry_count: int
 
@@ -172,6 +176,7 @@ def _generate_code(state: AgentState) -> AgentState:
             "assistant_reply": result.get("assistant_reply", "Done."),
             "action_type": result.get("action_type", "query"),
             "token_usage": result.get("token_usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}),
+            "table_request": result.get("table_request", {"enabled": False, "title": "Query Table"}),
             "error": None,
         }
     except Exception as e:
@@ -180,6 +185,7 @@ def _generate_code(state: AgentState) -> AgentState:
             "assistant_reply": f"Failed to generate code: {e}",
             "action_type": "query",
             "token_usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            "table_request": {"enabled": False, "title": "Query Table"},
             "error": str(e),
         }
 
@@ -193,6 +199,8 @@ def _execute_code(state: AgentState) -> AgentState:
             "result_rows": rows,
             "visualization": None,
             "query_output": None,
+            "query_table_rows": None,
+            "query_tables": [],
             "mutation": False,
             "highlight_indices": [],
             "error": state.get("error") or "No code to execute",
@@ -201,10 +209,28 @@ def _execute_code(state: AgentState) -> AgentState:
     try:
         rows = state.get("rows") or []
         result = run_sandboxed(code, rows)
+        table_request = state.get("table_request") or {"enabled": False, "title": "Query Table"}
+        table_enabled = bool(table_request.get("enabled", False))
+        table_title = str(table_request.get("title") or "Query Table").strip() or "Query Table"
+
+        query_tables: list[dict[str, Any]] = []
+        if table_enabled and not result.mutation:
+            table_rows = result.query_table_rows or []
+            if not table_rows and result.rows:
+                table_rows = result.rows[:50]
+            if table_rows:
+                query_tables = [{
+                    "id": uuid4().hex,
+                    "title": table_title,
+                    "rows": table_rows,
+                }]
+
         return {
             "result_rows": result.rows,
             "visualization": result.visualization,
             "query_output": result.query_output,
+            "query_table_rows": result.query_table_rows,
+            "query_tables": query_tables,
             "mutation": result.mutation,
             "highlight_indices": result.highlight_indices,
             "error": None,
@@ -215,6 +241,8 @@ def _execute_code(state: AgentState) -> AgentState:
             "result_rows": rows,
             "visualization": None,
             "query_output": None,
+            "query_table_rows": None,
+            "query_tables": [],
             "mutation": False,
             "highlight_indices": [],
             "error": str(e),
@@ -247,6 +275,7 @@ def _fix_code(state: AgentState) -> AgentState:
             "assistant_reply": result.get("assistant_reply", "Done."),
             "action_type": result.get("action_type") or state.get("action_type") or "query",
             "token_usage": merged,
+            "table_request": result.get("table_request", {"enabled": False, "title": "Query Table"}),
             "retry_count": retry,
             "error": None,
         }

@@ -11,8 +11,19 @@ class ChatMessage(BaseModel):
 class AgentRequest(BaseModel):
     prompt: str
     rows: list[dict[str, Any]] = Field(default_factory=list)
+    dataset_id: str | None = None
     model: str = "gemini-2.0-flash"
     history: list[ChatMessage] = Field(default_factory=list)
+
+
+class DatasetRegisterRequest(BaseModel):
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class DatasetRegisterResponse(BaseModel):
+    dataset_id: str
+    row_count: int
+    column_count: int
 
 
 class TokenUsage(BaseModel):
@@ -21,10 +32,17 @@ class TokenUsage(BaseModel):
     total_tokens: int = 0
 
 
+class QueryTable(BaseModel):
+    id: str
+    title: str
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class AgentResponse(BaseModel):
     rows: list[dict[str, Any]]
     visualization: dict[str, Any] | None = None
     query_output: str | None = None
+    query_tables: list[QueryTable] = Field(default_factory=list)
     code: str
     assistant_reply: str
     context_preview: dict[str, Any]

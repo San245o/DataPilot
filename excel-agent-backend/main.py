@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import json
+from collections import OrderedDict
 from typing import Any, AsyncGenerator
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 
-from schemas import AgentRequest, AgentResponse
+from schemas import AgentRequest, AgentResponse, DatasetRegisterRequest, DatasetRegisterResponse
 from workflow import build_workflow
 
 load_dotenv()
@@ -25,6 +27,8 @@ app.add_middleware(
 
 # Build workflow once at startup
 _workflow = None
+_dataset_store: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
+MAX_CACHED_DATASETS = 20
 
 
 def get_workflow():
@@ -32,6 +36,30 @@ def get_workflow():
     if _workflow is None:
         _workflow = build_workflow()
     return _workflow
+
+
+def _cache_dataset(rows: list[dict[str, Any]]) -> str:
+    dataset_id = uuid4().hex
+    _dataset_store[dataset_id] = rows
+    _dataset_store.move_to_end(dataset_id)
+
+    while len(_dataset_store) > MAX_CACHED_DATASETS:
+        _dataset_store.popitem(last=False)
+
+    return dataset_id
+
+
+def _resolve_rows(payload: AgentRequest) -> list[dict[str, Any]]:
+    if payload.dataset_id:
+        cached_rows = _dataset_store.get(payload.dataset_id)
+        if cached_rows is None:
+            raise HTTPException(status_code=404, detail="Dataset not found. Upload again.")
+
+        # Mark as recently used in the LRU cache.
+        _dataset_store.move_to_end(payload.dataset_id)
+        return cached_rows
+
+    return payload.rows
 
 
 def _safe_get(state: dict | None, key: str, default: Any = None) -> Any:
@@ -46,16 +74,31 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.post("/dataset/register", response_model=DatasetRegisterResponse)
+def register_dataset(payload: DatasetRegisterRequest) -> DatasetRegisterResponse:
+    if not payload.rows:
+        raise HTTPException(status_code=400, detail="Upload data first")
+
+    dataset_id = _cache_dataset(payload.rows)
+    column_count = len(payload.rows[0]) if payload.rows else 0
+    return DatasetRegisterResponse(
+        dataset_id=dataset_id,
+        row_count=len(payload.rows),
+        column_count=column_count,
+    )
+
+
 @app.post("/agent/execute", response_model=AgentResponse)
 def execute_agent(payload: AgentRequest) -> AgentResponse:
-    if not payload.rows:
+    rows = _resolve_rows(payload)
+    if not rows:
         raise HTTPException(status_code=400, detail="Upload data first")
 
     try:
         workflow = get_workflow()
         final_state = workflow.invoke({
             "prompt": payload.prompt,
-            "rows": payload.rows,
+            "rows": rows,
             "model": payload.model,
             "history": [m.model_dump() for m in payload.history],
         })
@@ -64,9 +107,10 @@ def execute_agent(payload: AgentRequest) -> AgentResponse:
             raise HTTPException(status_code=500, detail="No result from agent")
 
         return AgentResponse(
-            rows=_safe_get(final_state, "result_rows", payload.rows),
+            rows=_safe_get(final_state, "result_rows", rows),
             visualization=_safe_get(final_state, "visualization"),
             query_output=_safe_get(final_state, "query_output"),
+            query_tables=_safe_get(final_state, "query_tables", []),
             code=_safe_get(final_state, "code", ""),
             assistant_reply=_safe_get(final_state, "assistant_reply", "Done."),
             context_preview={
@@ -90,6 +134,11 @@ async def _stream_agent_execution(payload: AgentRequest) -> AsyncGenerator[str, 
         return f"data: {json.dumps({'event': event, 'data': data})}\n\n"
 
     try:
+        rows = _resolve_rows(payload)
+        if not rows:
+            yield emit("error", {"message": "Upload data first"})
+            return
+
         yield emit("step", {"id": "schema", "status": "active"})
         workflow = get_workflow()
         yield emit("step", {"id": "schema", "status": "done"})
@@ -97,7 +146,7 @@ async def _stream_agent_execution(payload: AgentRequest) -> AsyncGenerator[str, 
         yield emit("step", {"id": "generate", "status": "active"})
         final_state = workflow.invoke({
             "prompt": payload.prompt,
-            "rows": payload.rows,
+            "rows": rows,
             "model": payload.model,
             "history": [m.model_dump() for m in payload.history],
         })
@@ -113,9 +162,10 @@ async def _stream_agent_execution(payload: AgentRequest) -> AsyncGenerator[str, 
             return
 
         response = AgentResponse(
-            rows=_safe_get(final_state, "result_rows", payload.rows),
+            rows=_safe_get(final_state, "result_rows", rows),
             visualization=_safe_get(final_state, "visualization"),
             query_output=_safe_get(final_state, "query_output"),
+            query_tables=_safe_get(final_state, "query_tables", []),
             code=_safe_get(final_state, "code", ""),
             assistant_reply=_safe_get(final_state, "assistant_reply", "Done."),
             context_preview={
@@ -136,7 +186,8 @@ async def _stream_agent_execution(payload: AgentRequest) -> AsyncGenerator[str, 
 
 @app.post("/agent/stream")
 async def stream_agent(payload: AgentRequest) -> StreamingResponse:
-    if not payload.rows:
+    rows = _resolve_rows(payload)
+    if not rows:
         raise HTTPException(status_code=400, detail="Upload data first")
 
     return StreamingResponse(

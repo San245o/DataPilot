@@ -56,6 +56,7 @@ export function PlotlyBoard({ data, layout, isDark = true }: PlotlyBoardProps) {
         displaylogo: false,
         responsive: true,
         displayModeBar: "hover",
+        modeBarButtonsToAdd: ["zoom2d", "pan2d", "zoomIn2d", "zoomOut2d", "autoScale2d", "resetScale2d"],
         modeBarButtonsToRemove: ["lasso2d", "select2d", "sendDataToCloud"],
         toImageButtonOptions: {
           format: "png",
