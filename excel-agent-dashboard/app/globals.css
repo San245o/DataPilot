@@ -48,11 +48,11 @@
 }
 
 :root {
-  --background: oklch(1 0 0);
+  --background: oklch(0.96 0.01 85);
   --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
+  --card: oklch(0.98 0.005 85);
   --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
+  --popover: oklch(0.98 0.01 85);
   --popover-foreground: oklch(0.145 0 0);
   --primary: oklch(0.205 0 0);
   --primary-foreground: oklch(0.985 0 0);
@@ -271,4 +271,14 @@
 /* Prevent page-level horizontal scrollbar */
 html, body {
   overflow: hidden;
+}
+@keyframes swipe {
+  0% { transform: translateX(-100%); opacity: 0; }
+  20% { opacity: 1; }
+  80% { opacity: 1; }
+  100% { transform: translateX(200%); opacity: 0; }
+}
+
+.animate-swipe {
+  animation: swipe 1.5s ease-in-out forwards;
 }

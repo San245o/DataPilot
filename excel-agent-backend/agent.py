@@ -17,23 +17,27 @@ RESPONSE FORMAT - Return ONLY valid JSON (no markdown):
 ENV: df (DataFrame), pd, np, px, go pre-loaded. NO imports. End with result_df=df.
 
 HELPERS:
-- log_output(msg) - display any text/DataFrame/Series (use .to_string())
+- log_output(msg) - log text or pass a DataFrame/Series directly (e.g. log_output(df)) to populate the UI table. Do NOT use .to_string() for tables!
 - print_query('filter_expr') - filter df with query string like 'Price>100'
 - print_table(max_rows=10) - show df snapshot
 - highlight_rows(indices) - pass a list of ALL matching indices (do not truncate or slice the list)
-- Mutations: edit_cell(row,col,val), add_column(name), delete_column(name), rename_column(old,new), add_row(dict), delete_row(idx)
+- Mutations: To add rows use `df = pd.concat([df, pd.DataFrame([...])], ignore_index=True)`. Do NOT use `df.append()`! edit_cell(row,col,val), add_column(name), delete_column(name), rename_column(old,new), delete_row(idx)
 
 PATTERNS:
-A) Aggregation: result=df.groupby('X')['Y'].sum(); log_output(result.to_string()); result_df=df
+A) Aggregation: result=df.groupby('X')['Y'].sum().reset_index(); log_output(result); result_df=df
 B) Filter: print_query('Rating>8'); result_df=df
-C) Complex filter: mask=(df['A']>5)&(df['B']=='x'); log_output(df[mask].to_string()); result_df=df
+C) Complex filter: mask=(df['A']>5)&(df['B']=='x'); log_output(df[mask]); result_df=df
 D) Mutation: df['Col']=df['Col'].str.replace('old','new'); result_df=df
 
 RULES:
-- Single quotes in code, .to_string() for DataFrames, handle NaN with dropna/fillna
+- Single quotes in code, pass DataFrames directly to log_output for rendering, handle NaN with dropna/fillna
 - String match: .str.contains('x',case=False,na=False)
 - Charts: assign to fig, never call fig.show/to_html/to_json
-- table_request.enabled=true only if user explicitly wants UI table; then use log_output/print_query to emit data
+- For structural MUTATIONS (add/drop columns/rows, clean datatypes): Modify `df` directly, return `result_df=df`, and set `table_request.enabled=False`. Do NOT create separate tables for this.
+- For FINDING/SEARCHING (e.g. "find all students"): Use `highlight_rows(df[mask].index.tolist())`. Do NOT use `table_request.enabled=True` unless specifically asked to separate it.
+- For LISTING/PRINTING (e.g. "list the top 5 students"): If the result has < 10 rows, format the output as a bulleted markdown list in `assistant_reply` (do NOT use tables or df.to_markdown()). If the result has >= 10 rows, do NOT include the text in chat; instead, use `highlight_rows()` to show the result in the main table. Always set `table_request.enabled=False`.
+- For EXTRACTIONS/PIVOTS (e.g. "pivot table", "extract to new table"): Create a subset df, pass it via `log_output(subset_df)`, and set `table_request.enabled=True`.
+- table_request.title MUST be very short (max 3-5 words), e.g., "Low Involvement".
 """
 
 VIZ_RULES = """
@@ -179,6 +183,7 @@ def _invoke_model(*, model_name: str, system_prompt: str, user_message: str) -> 
         client = ChatCompletionsClient(
             endpoint="https://models.github.ai/inference",
             credential=AzureKeyCredential(github_token),
+            retry_total=0,
         )
         response = client.complete(
             messages=[SystemMessage(system_prompt), UserMessage(user_message)],
@@ -192,7 +197,7 @@ def _invoke_model(*, model_name: str, system_prompt: str, user_message: str) -> 
             usage["total_tokens"] = response.usage.total_tokens
         return raw, usage
 
-    if model_name and (model_name.startswith("minimax") or model_name.startswith("google/codegemma")):
+    if model_name and (model_name.startswith("minimax") or model_name.startswith("google/codegemma") or model_name.startswith("meta/")):
         from openai import OpenAI
 
         nvidia_api_key = os.getenv("NVIDIA_API_KEY")
@@ -437,6 +442,7 @@ Never output markdown or ASCII tables in this response."""
         client = ChatCompletionsClient(
             endpoint="https://models.github.ai/inference",
             credential=AzureKeyCredential(github_token),
+            retry_total=0,
         )
         response = client.complete(
             messages=[

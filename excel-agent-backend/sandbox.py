@@ -14,6 +14,13 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 
+def _df_to_records(df_obj: Any) -> list[dict[str, Any]]:
+    # If the DataFrame has a custom index (like a pivot table), we MUST reset it so it becomes a column
+    # Otherwise, to_dict("records") will drop the index entirely and the data looks broken on the frontend
+    if not isinstance(df_obj.index, pd.RangeIndex):
+        df_obj = df_obj.reset_index()
+    return _sanitize_for_json(df_obj.to_dict(orient="records"))
+
 def _sanitize_for_json(obj: Any) -> Any:
     """Recursively convert numpy types, NaN, Inf, and plotly bdata to JSON-safe values."""
     if isinstance(obj, dict):
@@ -165,7 +172,7 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
             else:
                 msg += f"\n{message.to_string()}"
             query_logs.append(msg)
-            query_table_rows = _sanitize_for_json(message.to_dict(orient="records"))
+            query_table_rows = _df_to_records(message)
         elif isinstance(message, pd.Series):
             s_len = len(message)
             msg = f"[Series: {s_len} items]"
@@ -175,7 +182,7 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
                 msg += f"\n{message.to_string()}"
             query_logs.append(msg)
             series_df = message.to_frame(name=message.name or "value").reset_index()
-            query_table_rows = _sanitize_for_json(series_df.to_dict(orient="records"))
+            query_table_rows = _df_to_records(series_df)
         else:
             s = str(message)
             if len(s) > 5000:
@@ -193,14 +200,14 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
                 msg = f"[DataFrame: {df_len} rows]\n"
                 msg += a.head(10).to_string() if df_len > 10 else a.to_string()
                 parts.append(msg)
-                query_table_rows = _sanitize_for_json(a.to_dict(orient="records"))
+                query_table_rows = _df_to_records(a)
             elif isinstance(a, pd.Series):
                 s_len = len(a)
                 msg = f"[Series: {s_len} items]\n"
                 msg += a.head(10).to_string() if s_len > 10 else a.to_string()
                 parts.append(msg)
                 series_df = a.to_frame(name=a.name or "value").reset_index()
-                query_table_rows = _sanitize_for_json(series_df.to_dict(orient="records"))
+                query_table_rows = _df_to_records(series_df)
             else:
                 s = str(a)
                 if len(s) > 5000:
@@ -227,7 +234,7 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
         else:
             msg += f"\n{queried_df.to_string(index=False)}"
         query_logs.append(msg)
-        query_table_rows = _sanitize_for_json(queried_df.to_dict(orient="records"))
+        query_table_rows = _df_to_records(queried_df)
         return queried_df
 
     def print_table(max_rows: int = 10) -> pd.DataFrame:
@@ -240,7 +247,7 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
         else:
             msg += f"\n{current_df.to_string(index=False)}"
         query_logs.append(msg)
-        query_table_rows = _sanitize_for_json(current_df.to_dict(orient="records"))
+        query_table_rows = _df_to_records(current_df)
         return current_df
 
     def add_column(name: str, default: Any = None) -> pd.DataFrame:
@@ -399,7 +406,7 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
 
     return {
         "ok": True,
-        "rows": _sanitize_for_json(result_df.to_dict(orient="records")),
+        "rows": _df_to_records(result_df),
         "visualization": visualization,
         "query_output": query_output,
         "query_table_rows": query_table_rows,

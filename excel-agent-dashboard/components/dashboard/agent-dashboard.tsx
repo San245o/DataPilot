@@ -81,6 +81,9 @@ type PivotTableTab = {
   title: string
   rows: SheetRow[]
   open: boolean
+  isNew?: boolean
+  insertions?: number
+  deletions?: number
 }
 type DragState = {
   id: string
@@ -124,7 +127,7 @@ const transformationSteps = [
   { label: "Context", icon: Layers, isContextButton: true },
 ]
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api/backend"
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL?.replace("localhost", "127.0.0.1") ?? "http://127.0.0.1:8000"
 
 // Virtualization constants
 const ROW_HEIGHT = 28 // Height of each row in pixels
@@ -753,60 +756,40 @@ export function AgentDashboard() {
       const addedColumns = nextColumns.filter((col) => !currentColumns.includes(col))
       const removedColumns = currentColumns.filter((col) => !nextColumns.includes(col))
       const rowDelta = nextRows.length - rows.length
-      const hasSchemaChange =
-        Boolean(finalPayload.mutation) &&
-        nextRows.length > 0 &&
-        (addedColumns.length > 0 || removedColumns.length > 0)
-      const hasRowCountChange = Boolean(finalPayload.mutation) && rowDelta !== 0
-      const shouldCreateSeparateTable = hasSchemaChange || hasRowCountChange
+              const createdTableLink: { id: string; title: string } | null = null
 
-      let createdTableLink: { id: string; title: string } | null = null
-
-      if (responseTables.length > 0) {
-        const normalizedTables = responseTables.map((table) => ({
-          id: table.id,
-          title: table.title,
-          rows: normalizeRows(table.rows as Record<string, unknown>[]),
-          open: true,
-        }))
-
-        setPivotTables((prev) => {
-          const byId = new Map(prev.map((item) => [item.id, item]))
-          normalizedTables.forEach((table) => {
-            byId.set(table.id, table)
-          })
-          return Array.from(byId.values())
-        })
-        setActiveDataTab(normalizedTables[0].id)
-      }
-
-      if (shouldCreateSeparateTable) {
-        const pivotId = `${Date.now()}-${Math.floor(Math.random() * 100000)}`
-        const changeParts: string[] = []
-        if (addedColumns.length > 0) changeParts.push(`+cols ${addedColumns.join(", ")}`)
-        if (removedColumns.length > 0) changeParts.push(`-cols ${removedColumns.join(", ")}`)
-        if (rowDelta > 0) changeParts.push(`+${rowDelta} rows`)
-        if (rowDelta < 0) changeParts.push(`${rowDelta} rows`)
-        const pivotTitle = `Separated ${pivotTables.length + 1}: ${changeParts.join(" | ")}`
-
-        setPivotTables((prev) => [
-          ...prev,
-          {
-            id: pivotId,
-            title: pivotTitle,
-            rows: nextRows,
+        if (responseTables.length > 0) {
+          const normalizedTables = responseTables.map((table) => ({
+            id: table.id,
+            title: table.title,
+            rows: normalizeRows(table.rows as Record<string, unknown>[]),
             open: true,
-          },
-        ])
-        setActiveDataTab(pivotId)
-        createdTableLink = { id: pivotId, title: pivotTitle }
-      } else if (finalPayload.mutation && nextRows.length > 0) {
-        // Mutations without schema/row-count changes update base data directly.
-        setRows(nextRows)
-        setActiveDataTab("base")
-      }
+            isNew: true,
+            insertions: table.rows ? table.rows.length : 0,
+          }))
 
-      // Highlight matching rows (works for both queries and mutations)
+          setPivotTables((prev) => {
+            const byId = new Map(prev.map((item) => [item.id, item]))
+            normalizedTables.forEach((table) => {
+              byId.set(table.id, table)
+            })
+            return Array.from(byId.values())
+          })
+          setActiveDataTab(normalizedTables[0].id)	
+          
+          setTimeout(() => {
+            setPivotTables((prev) =>
+              prev.map((tab) => (normalizedTables.find(t => t.id === tab.id) ? { ...tab, isNew: false } : tab))
+            )
+          }, 2000)
+        }
+
+        if (finalPayload.mutation && nextRows.length > 0) {
+          setRows(nextRows)
+          setActiveDataTab("base")
+        }
+
+        // Highlight matching rows (works for both queries and mutations)
       if (
         Array.isArray(finalPayload.highlight_indices) &&
         finalPayload.highlight_indices.length > 0
@@ -859,7 +842,7 @@ export function AgentDashboard() {
     } catch (agentError) {
       let message: string
       if (agentError instanceof TypeError && agentError.message.includes("fetch")) {
-        message = "Cannot reach the backend server. Make sure the backend is running on " + API_BASE_URL
+        message = "Error: " + String(agentError.message)
       } else if (agentError instanceof Error) {
         message = agentError.message
       } else {
@@ -1048,9 +1031,11 @@ export function AgentDashboard() {
               >
                 <option value="gemini-3-flash-preview">Gemini 3 Flash</option>
                 <option value="gemini-3.1-flash-lite-preview">Gemini 3.1 Flash Lite</option>
+                <option value="gpt-4o-mini">GPT-4o Mini (Fast)</option>
                 <option value="gpt-4o">GPT-4o (GitHub Models)</option>
                 <option value="minimaxai/minimax-m2.5">Minimax m2.5</option>
-                <option value="google/codegemma-7b">CodeGemma 7B (NVIDIA)</option>
+                <option value="meta/llama-3.1-405b-instruct">Llama 3.1 405B (NVIDIA)</option>
+                <option value="google/codegemma-1.1-7b">CodeGemma 7B (NVIDIA)</option>
               </select>
             </div>
           )}
@@ -1069,15 +1054,28 @@ export function AgentDashboard() {
             >
               <div className="flex items-center justify-between h-10 px-4 border-b border-border bg-card/30 shrink-0">
                 <div className="flex items-center gap-3">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-semibold text-foreground">
+                  <div className="flex items-center gap-2 group relative overflow-hidden px-1.5 py-0.5 rounded-sm">
+                    {/* Add cool swipe background for new tables */}
+                    {!isBaseDataTab && activePivotTable?.isNew && (
+                      <div className="absolute inset-0 z-0 bg-gradient-to-r from-transparent via-cyan-500/20 to-transparent animate-swipe" />
+                    )}
+
+                    <span className="relative z-10 text-xs font-semibold text-foreground max-w-[250px] truncate">
                       {isBaseDataTab ? "Data" : activePivotTable?.title || "Data"}
                     </span>
+
+                    {!isBaseDataTab && activePivotTable && (activePivotTable.insertions || activePivotTable.deletions) && (
+                      <span className="relative z-10 opacity-0 group-hover:opacity-100 flex gap-1 text-[10px] items-center px-1 transition-opacity ml-1 font-bold">
+                        {activePivotTable.insertions != null && <span className="text-green-500">+{activePivotTable.insertions}</span>}
+                        {activePivotTable.deletions != null && <span className="text-destructive">-{activePivotTable.deletions}</span>}
+                      </span>
+                    )}
+
                     {!isBaseDataTab && activePivotTable && (
                       <button
                         type="button"
                         onClick={() => closePivotTab(activePivotTable.id)}
-                        className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+                        className="relative z-10 flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
                         title="Close pivot table"
                       >
                         <X className="size-3" />
@@ -1115,7 +1113,7 @@ export function AgentDashboard() {
                             Base Data
                           </button>
                           {pivotTables.map((pivot) => (
-                            <div key={pivot.id} className="flex items-center">
+                            <div key={pivot.id} className="flex items-center group relative overflow-hidden">
                               <button
                                 type="button"
                                 onClick={() => {
@@ -1127,25 +1125,23 @@ export function AgentDashboard() {
                                   setActiveDataTab(pivot.id)
                                   setPivotMenuOpen(false)
                                 }}
-                                className={`flex-1 text-left px-3 py-1.5 text-xs transition-colors ${
+                                className={`flex-1 flex items-center overflow-hidden text-left px-3 py-1.5 text-xs transition-colors py-1 ${
                                   activeDataTab === pivot.id
                                     ? "text-primary bg-primary/10"
                                     : "text-foreground hover:bg-accent"
                                 }`}
+                                title={pivot.title}
                               >
-                                {pivot.title}
-                                {!pivot.open ? " (closed)" : ""}
+                                <span className="truncate inline-block align-bottom max-w-[150px]">{pivot.title}</span>
+
+                                {(pivot.insertions || pivot.deletions) && (
+                                  <span className="opacity-0 group-hover:opacity-100 flex gap-1 text-[10px] items-center px-1 transition-opacity ml-auto font-bold pl-2 bg-gradient-to-r from-transparent to-background/80">
+                                    {pivot.insertions != null && <span className="text-green-500">+{pivot.insertions}</span>}
+                                    {pivot.deletions != null && <span className="text-destructive">-{pivot.deletions}</span>}
+                                  </span>
+                                )}
                               </button>
-                              {pivot.open && (
-                                <button
-                                  type="button"
-                                  onClick={() => closePivotTab(pivot.id)}
-                                  className="mr-1 flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-                                  title="Close pivot table"
-                                >
-                                  <X className="size-3" />
-                                </button>
-                              )}
+                              
                             </div>
                           ))}
                         </div>
@@ -1454,8 +1450,8 @@ export function AgentDashboard() {
                             className="inline-flex items-center gap-1 rounded-md border border-border bg-card px-2 py-1 text-[10px] font-medium text-foreground hover:bg-accent transition-colors"
                             title="Open table in Data region"
                           >
-                            <span>Open table:</span>
-                            <span className="text-primary">{tableLink.title}</span>
+                            
+                            <span className="text-primary truncate max-w-[200px]" title={tableLink.title}>{tableLink.title}</span>
                           </button>
                         ))}
                       </div>
@@ -1598,3 +1594,4 @@ export function AgentDashboard() {
     </div>
   )
 }
+
