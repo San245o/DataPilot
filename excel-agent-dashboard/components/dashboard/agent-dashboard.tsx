@@ -127,7 +127,7 @@ const transformationSteps = [
   { label: "Context", icon: Layers, isContextButton: true },
 ]
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL?.replace("localhost", "127.0.0.1") ?? "http://127.0.0.1:8000"
+const API_BASE_URL = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api/backend").replace(/\/$/, "")
 
 // Virtualization constants
 const ROW_HEIGHT = 28 // Height of each row in pixels
@@ -650,9 +650,10 @@ export function AgentDashboard() {
       setThinkingSteps(steps)
     }
 
+    const endpoint = thinkingMode ? `${API_BASE_URL}/agent/stream` : `${API_BASE_URL}/agent/execute`
+
     try {
       // Use streaming endpoint only if thinking mode is enabled
-      const endpoint = thinkingMode ? `${API_BASE_URL}/agent/stream` : `${API_BASE_URL}/agent/execute`
       
       const response = await fetch(endpoint, {
         method: "POST",
@@ -842,7 +843,7 @@ export function AgentDashboard() {
     } catch (agentError) {
       let message: string
       if (agentError instanceof TypeError && agentError.message.includes("fetch")) {
-        message = "Error: " + String(agentError.message)
+        message = `Failed to reach backend at ${endpoint}. If you are running the dashboard in a remote/devcontainer setup, use the default /api/backend proxy or set NEXT_PUBLIC_API_BASE_URL to a reachable URL.`
       } else if (agentError instanceof Error) {
         message = agentError.message
       } else {
