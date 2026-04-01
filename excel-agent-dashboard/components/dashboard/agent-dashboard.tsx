@@ -8,6 +8,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Code,
+  ExternalLink,
   FileSpreadsheet,
   Layers,
   Loader2,
@@ -15,7 +16,6 @@ import {
   Minimize2,
   Moon,
   Send,
-  Sparkles,
   Sun,
   Upload,
   Download,
@@ -91,6 +91,12 @@ type DragState = {
   offsetY: number
 } | null
 
+type SlashCommandOption = {
+  command: string
+  description: string
+  rewritePrefix: string
+}
+
 type ResizeState = {
   id: string
   startX: number
@@ -101,12 +107,6 @@ type ResizeState = {
   startWidgetY: number
   corner: "se" | "sw" | "ne" | "nw"
 } | null
-
-type ThinkingStep = {
-  id: string
-  label: string
-  status: "pending" | "active" | "done"
-}
 
 type FullscreenPanel = "data" | "canvas" | null
 
@@ -127,7 +127,68 @@ const transformationSteps = [
   { label: "Context", icon: Layers, isContextButton: true },
 ]
 
+const SLASH_COMMANDS: SlashCommandOption[] = [
+  {
+    command: "/visualize",
+    description: "Build a chart (bar, line, scatter, pie, heatmap).",
+    rewritePrefix: "Create a visualization.",
+  },
+  {
+    command: "/modify",
+    description: "Update rows/columns in the main dataset.",
+    rewritePrefix: "Modify the dataset.",
+  },
+  {
+    command: "/extract",
+    description: "Create a separate result table from selected rows/columns.",
+    rewritePrefix: "Extract a separate result table.",
+  },
+  {
+    command: "/filter",
+    description: "Find matching rows without mutating source data.",
+    rewritePrefix: "Filter the dataset to find matching rows.",
+  },
+  {
+    command: "/summarize",
+    description: "Get concise KPIs, totals, and summary stats.",
+    rewritePrefix: "Summarize the key metrics concisely.",
+  },
+  {
+    command: "/pivot",
+    description: "Create a pivot/matrix view from categorical dimensions.",
+    rewritePrefix: "Create a pivot-style matrix.",
+  },
+  {
+    command: "/compare",
+    description: "Compare categories, segments, or time periods.",
+    rewritePrefix: "Compare groups or categories.",
+  },
+  {
+    command: "/correlate",
+    description: "Analyze numeric relationships/correlation.",
+    rewritePrefix: "Analyze correlation between relevant numeric columns.",
+  },
+  {
+    command: "/trend",
+    description: "Analyze changes over time.",
+    rewritePrefix: "Analyze the trend over time.",
+  },
+  {
+    command: "/clean",
+    description: "Standardize values and clean missing/dirty data.",
+    rewritePrefix: "Clean and standardize the data.",
+  },
+  {
+    command: "/help",
+    description: "Show what this dataset assistant can do.",
+    rewritePrefix: "Show a concise list of things you can do with this dataset.",
+  },
+]
+
 const API_BASE_URL = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api/backend").replace(/\/$/, "")
+const SLASH_ROW_HEIGHT = 32
+const SLASH_ROW_GAP = 4
+const SLASH_DESCRIPTION_DELAY_MS = 1000
 
 // Virtualization constants
 const ROW_HEIGHT = 28 // Height of each row in pixels
@@ -135,6 +196,35 @@ const OVERSCAN = 5 // Extra rows to render above/below viewport
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(value, max))
+}
+
+function getActiveSlashQuery(text: string): string | null {
+  const trimmed = text.trimStart()
+  if (!trimmed.startsWith("/")) return null
+
+  const firstToken = trimmed.split(/\s+/, 1)[0]
+  if (firstToken.length < 1) return null
+  if (trimmed.includes(" ")) return null
+
+  return firstToken.slice(1).toLowerCase()
+}
+
+function expandSlashPrompt(rawPrompt: string): string {
+  const trimmed = rawPrompt.trim()
+  if (!trimmed.startsWith("/")) {
+    return rawPrompt
+  }
+
+  const [commandToken, ...restParts] = trimmed.split(/\s+/)
+  const rest = restParts.join(" ").trim()
+  const matched = SLASH_COMMANDS.find((item) => item.command === commandToken.toLowerCase())
+  if (!matched) {
+    return rawPrompt
+  }
+  if (!rest) {
+    return matched.rewritePrefix
+  }
+  return `${matched.rewritePrefix} ${rest}`
 }
 
 /** Lightweight markdown renderer for chat bubbles:
@@ -238,8 +328,6 @@ export function AgentDashboard() {
   const [isSplitterDragging, setIsSplitterDragging] = useState(false)
   const [chatWidth, setChatWidth] = useState(360)
   const [isChatSplitterDragging, setIsChatSplitterDragging] = useState(false)
-  const [thinkingMode, setThinkingMode] = useState(false)
-  const [thinkingSteps, setThinkingSteps] = useState<ThinkingStep[]>([])
   const [expandedCodeIndex, setExpandedCodeIndex] = useState<number | null>(null)
   const [chartMenuOpen, setChartMenuOpen] = useState(false)
   const [pivotMenuOpen, setPivotMenuOpen] = useState(false)
@@ -248,6 +336,9 @@ export function AgentDashboard() {
   const [isContextOpen, setIsContextOpen] = useState(false)
   const [totalTokens, setTotalTokens] = useState({ prompt: 0, completion: 0, total: 0 })
   const [queryCount, setQueryCount] = useState(0)
+  const [selectedSlashIndex, setSelectedSlashIndex] = useState(0)
+  const [slashDismissed, setSlashDismissed] = useState(false)
+  const [visibleSlashDescriptionFor, setVisibleSlashDescriptionFor] = useState<string | null>(null)
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
     {
       role: "assistant",
@@ -260,11 +351,81 @@ export function AgentDashboard() {
   const splitContainerRef = useRef<HTMLDivElement | null>(null)
   const tableContainerRef = useRef<HTMLDivElement | null>(null)
   const mainContentRef = useRef<HTMLDivElement | null>(null)
+  const promptInputRef = useRef<HTMLTextAreaElement | null>(null)
+  const slashDescriptionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const isRunningRef = useRef(false)
+  const slashQuery = useMemo(() => getActiveSlashQuery(prompt), [prompt])
+  const filteredSlashCommands = useMemo(() => {
+    if (slashQuery === null) return []
+    if (!slashQuery) return SLASH_COMMANDS
+    return SLASH_COMMANDS.filter((item) => item.command.slice(1).startsWith(slashQuery))
+  }, [slashQuery])
+  const showSlashMenu = slashQuery !== null && !slashDismissed && filteredSlashCommands.length > 0
+  const activeSlashIndex = showSlashMenu
+    ? Math.min(selectedSlashIndex, filteredSlashCommands.length - 1)
+    : 0
   const activePivotTable = useMemo(
     () => pivotTables.find((table) => table.id === activeDataTab && table.open),
     [pivotTables, activeDataTab]
   )
   const isBaseDataTab = activeDataTab === "base" || !activePivotTable
+
+  useEffect(() => {
+    setSelectedSlashIndex(0)
+  }, [slashQuery])
+
+  const clearSlashDescriptionTimer = useCallback(() => {
+    if (slashDescriptionTimerRef.current) {
+      clearTimeout(slashDescriptionTimerRef.current)
+      slashDescriptionTimerRef.current = null
+    }
+  }, [])
+
+  const hideSlashDescription = useCallback(() => {
+    clearSlashDescriptionTimer()
+    setVisibleSlashDescriptionFor(null)
+  }, [clearSlashDescriptionTimer])
+
+  const scheduleSlashDescription = useCallback((command: string) => {
+    clearSlashDescriptionTimer()
+    setVisibleSlashDescriptionFor(null)
+    slashDescriptionTimerRef.current = setTimeout(() => {
+      setVisibleSlashDescriptionFor(command)
+      slashDescriptionTimerRef.current = null
+    }, SLASH_DESCRIPTION_DELAY_MS)
+  }, [clearSlashDescriptionTimer])
+
+  const handleSlashOptionHover = useCallback((index: number, command: string) => {
+    setSelectedSlashIndex((prev) => (prev === index ? prev : index))
+    scheduleSlashDescription(command)
+  }, [scheduleSlashDescription])
+
+  useEffect(() => {
+    if (showSlashMenu) return
+    hideSlashDescription()
+  }, [showSlashMenu, hideSlashDescription])
+
+  useEffect(() => {
+    return () => {
+      clearSlashDescriptionTimer()
+    }
+  }, [clearSlashDescriptionTimer])
+
+  const insertSlashCommand = useCallback((item: SlashCommandOption) => {
+    const nextValue = `${item.command} `
+    setPrompt(nextValue)
+    setSlashDismissed(false)
+    setSelectedSlashIndex(0)
+    setVisibleSlashDescriptionFor(null)
+    clearSlashDescriptionTimer()
+
+    requestAnimationFrame(() => {
+      const input = promptInputRef.current
+      if (!input) return
+      input.focus()
+      input.setSelectionRange(nextValue.length, nextValue.length)
+    })
+  }, [clearSlashDescriptionTimer])
   const tableRows = isBaseDataTab ? rows : (activePivotTable?.rows ?? rows)
   const headers = useMemo(() => Object.keys(tableRows[0] ?? {}), [tableRows])
 
@@ -452,6 +613,35 @@ export function AgentDashboard() {
     })
   }, [])
 
+  const openWidgetInNewTab = useCallback((widget: VizWidget) => {
+    if (typeof window === "undefined") return
+
+    try {
+      const storageKey = `datapilot:chart:${widget.id}:${Date.now()}`
+      localStorage.setItem(
+        storageKey,
+        JSON.stringify({
+          title: widget.title,
+          data: widget.data,
+          layout: widget.layout,
+          isDark,
+        })
+      )
+
+      const popup = window.open(
+        `/chart-viewer?chartKey=${encodeURIComponent(storageKey)}`,
+        "_blank",
+        "noopener,noreferrer"
+      )
+
+      if (!popup) {
+        setError("Popup was blocked. Allow popups for this site to open charts in a new tab.")
+      }
+    } catch {
+      setError("Unable to open chart in a new tab.")
+    }
+  }, [isDark])
+
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     if (!file) return
@@ -627,42 +817,35 @@ export function AgentDashboard() {
   }, [resizeState])
 
   const runAgent = async () => {
+    if (isRunningRef.current) return
     if (!prompt.trim()) return
 
     const outgoingPrompt = prompt.trim()
+    const expandedPrompt = expandSlashPrompt(outgoingPrompt)
     const nextMessages: ChatMessage[] = [
       ...chatMessages,
       { role: "user", content: outgoingPrompt },
     ]
     setChatMessages(nextMessages)
     setPrompt("")
+    isRunningRef.current = true
     setIsRunning(true)
     setError(null)
 
-    // Initialize thinking steps only if thinking mode is enabled
-    if (thinkingMode) {
-      const steps: ThinkingStep[] = [
-        { id: "schema", label: "Reading data schema...", status: "pending" },
-        { id: "generate", label: "Generating code...", status: "pending" },
-        { id: "execute", label: "Executing in sandbox...", status: "pending" },
-        { id: "prepare", label: "Preparing response...", status: "pending" },
-      ]
-      setThinkingSteps(steps)
-    }
-
-    const endpoint = thinkingMode ? `${API_BASE_URL}/agent/stream` : `${API_BASE_URL}/agent/execute`
+    const endpoint = `${API_BASE_URL}/agent/execute`
 
     try {
-      // Use streaming endpoint only if thinking mode is enabled
-      
       const response = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          prompt: outgoingPrompt,
+          prompt: expandedPrompt,
           rows,
           model: modelName,
-          history: nextMessages.map(m => ({ role: m.role, content: m.content })),
+          history: nextMessages.map((m) => ({
+            role: m.role,
+            content: m.role === "user" ? expandSlashPrompt(m.content) : m.content,
+          })),
         }),
       })
 
@@ -677,63 +860,7 @@ export function AgentDashboard() {
         }
       }
 
-      let finalPayload: AgentExecuteResponse | null = null
-
-      if (thinkingMode) {
-        // Streaming mode with step-by-step updates
-        const reader = response.body?.getReader()
-        if (!reader) throw new Error("No response body")
-
-        const decoder = new TextDecoder()
-        let buffer = ""
-
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-
-          buffer += decoder.decode(value, { stream: true })
-          const lines = buffer.split("\n\n")
-          buffer = lines.pop() ?? ""
-
-          for (const line of lines) {
-            if (!line.startsWith("data: ")) continue
-            try {
-              const eventData = JSON.parse(line.slice(6))
-              const { event, data } = eventData
-
-              if (event === "step") {
-                // Update thinking step status
-                setThinkingSteps((prev) =>
-                  prev.map((s) => {
-                    if (s.id === data.id) {
-                      return { ...s, status: data.status }
-                    }
-                    // If this step is now active, mark previous steps as done
-                    if (data.status === "active") {
-                      const stepOrder = ["schema", "generate", "execute", "prepare"]
-                      const activeIdx = stepOrder.indexOf(data.id)
-                      const thisIdx = stepOrder.indexOf(s.id)
-                      if (thisIdx < activeIdx && s.status !== "done") {
-                        return { ...s, status: "done" }
-                      }
-                    }
-                    return s
-                  })
-                )
-              } else if (event === "result") {
-                finalPayload = data as AgentExecuteResponse
-              } else if (event === "error") {
-                throw new Error(data.message)
-              }
-            } catch {
-              // Ignore parse errors for incomplete chunks
-            }
-          }
-        }
-      } else {
-        // Standard non-streaming mode
-        finalPayload = await response.json()
-      }
+      const finalPayload: AgentExecuteResponse = await response.json()
 
       if (!finalPayload) {
         throw new Error("No result received from agent")
@@ -752,12 +879,7 @@ export function AgentDashboard() {
         ? normalizeRows(finalPayload.rows as Record<string, unknown>[])
         : []
       const responseTables = Array.isArray(finalPayload.query_tables) ? finalPayload.query_tables : []
-      const currentColumns = Object.keys(rows[0] ?? {})
-      const nextColumns = Object.keys(nextRows[0] ?? {})
-      const addedColumns = nextColumns.filter((col) => !currentColumns.includes(col))
-      const removedColumns = currentColumns.filter((col) => !nextColumns.includes(col))
-      const rowDelta = nextRows.length - rows.length
-              const createdTableLink: { id: string; title: string } | null = null
+      const createdTableLink: { id: string; title: string } | null = null
 
         if (responseTables.length > 0) {
           const normalizedTables = responseTables.map((table) => ({
@@ -855,8 +977,8 @@ export function AgentDashboard() {
         { role: "assistant", content: `Error: ${message}` },
       ])
     } finally {
+      isRunningRef.current = false
       setIsRunning(false)
-      setThinkingSteps([])
     }
   }
 
@@ -1126,7 +1248,7 @@ export function AgentDashboard() {
                                   setActiveDataTab(pivot.id)
                                   setPivotMenuOpen(false)
                                 }}
-                                className={`flex-1 flex items-center overflow-hidden text-left px-3 py-1.5 text-xs transition-colors py-1 ${
+                                className={`flex-1 flex items-center overflow-hidden text-left px-3 py-1 text-xs transition-colors ${
                                   activeDataTab === pivot.id
                                     ? "text-primary bg-primary/10"
                                     : "text-foreground hover:bg-accent"
@@ -1333,9 +1455,10 @@ export function AgentDashboard() {
                   ref={boardRef}
                   className="absolute inset-0 overflow-auto"
                   style={{
+                    backgroundColor: isDark ? "transparent" : "rgba(239, 229, 207, 0.42)",
                     backgroundImage: isDark
                       ? "radial-gradient(circle, rgba(148,163,184,0.08) 1px, transparent 1px)"
-                      : "radial-gradient(circle, rgba(0,0,0,0.06) 1px, transparent 1px)",
+                      : "radial-gradient(circle, rgba(106, 86, 52, 0.2) 1.2px, transparent 1.2px)",
                     backgroundSize: "20px 20px",
                   }}
                 >
@@ -1358,18 +1481,44 @@ export function AgentDashboard() {
                           onMouseDown={(event) => startWidgetDrag(event, widget)}
                         >
                           <span className="text-[11px] font-semibold text-foreground">{widget.title}</span>
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              setWidgets((prev) => prev.filter((item) => item.id !== widget.id))
-                            }}
-                            className="rounded p-0.5 text-muted-foreground transition-colors hover:text-foreground hover:bg-accent"
-                          >
-                            <X className="size-3" />
-                          </button>
+                          <div className="flex items-center gap-1">
+                            <div className="group/open-tab relative">
+                              <button
+                                type="button"
+                                onMouseDown={(e) => {
+                                  e.preventDefault()
+                                  e.stopPropagation()
+                                }}
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  openWidgetInNewTab(widget)
+                                }}
+                                className="rounded p-0.5 text-muted-foreground transition-colors hover:text-foreground hover:bg-accent"
+                                aria-label="Open in new tab"
+                              >
+                                <ExternalLink className="size-3" />
+                              </button>
+                              <span className="pointer-events-none absolute right-full top-1/2 mr-1.5 -translate-y-1/2 whitespace-nowrap rounded bg-popover px-1.5 py-0.5 text-[10px] text-popover-foreground opacity-0 shadow transition-opacity group-hover/open-tab:opacity-100">
+                                Open in new tab
+                              </span>
+                            </div>
+                            <button
+                              type="button"
+                              onMouseDown={(e) => {
+                                e.preventDefault()
+                                e.stopPropagation()
+                              }}
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                setWidgets((prev) => prev.filter((item) => item.id !== widget.id))
+                              }}
+                              className="rounded p-0.5 text-muted-foreground transition-colors hover:text-foreground hover:bg-accent"
+                            >
+                              <X className="size-3" />
+                            </button>
+                          </div>
                         </div>
-                        <div className="min-h-0 flex-1 p-2">
+                        <div className="min-h-0 flex-1 p-1">
                           <PlotlyBoard data={widget.data} layout={widget.layout} isDark={isDark} />
                         </div>
                         {/* Resize handles at corners */}
@@ -1488,44 +1637,10 @@ export function AgentDashboard() {
 
               {isRunning && (
                 <div className="flex justify-start">
-                  {thinkingMode && thinkingSteps.length > 0 ? (
-                    <div className="rounded-xl bg-secondary px-3 py-2.5 text-xs">
-                      <div className="flex items-center gap-2 text-muted-foreground mb-2">
-                        <Loader2 className="size-3 animate-spin" />
-                        <span className="font-medium">Thinking...</span>
-                      </div>
-                      <div className="space-y-1.5">
-                        {thinkingSteps.map((step) => (
-                          <div
-                            key={step.id}
-                            className={`flex items-center gap-2 text-[11px] transition-all duration-200 ${
-                              step.status === "done"
-                                ? "text-primary"
-                                : step.status === "active"
-                                ? "text-foreground"
-                                : "text-muted-foreground/50"
-                            }`}
-                          >
-                            {step.status === "done" ? (
-                              <svg className="size-3" viewBox="0 0 16 16" fill="currentColor">
-                                <path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z" />
-                              </svg>
-                            ) : step.status === "active" ? (
-                              <Loader2 className="size-3 animate-spin" />
-                            ) : (
-                              <div className="size-3 rounded-full border border-current opacity-40" />
-                            )}
-                            <span>{step.label}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-2 rounded-xl bg-secondary px-3 py-2 text-xs text-muted-foreground">
-                      <Loader2 className="size-3 animate-spin" />
-                      Processing...
-                    </div>
-                  )}
+                  <div className="flex items-center gap-2 rounded-xl bg-secondary px-3 py-2 text-xs text-muted-foreground">
+                    <Loader2 className="size-3 animate-spin" />
+                    Processing...
+                  </div>
                 </div>
               )}
 
@@ -1547,45 +1662,124 @@ export function AgentDashboard() {
 
             {/* Input area */}
             <div className="border-t border-border p-3">
-              <div className="flex items-end gap-2">
-                <textarea
-                  className="flex-1 resize-none rounded-lg border border-border bg-secondary px-3 py-2 text-sm text-foreground outline-none transition placeholder:text-muted-foreground focus:ring-1 focus:ring-ring"
-                  placeholder="Ask something..."
-                  rows={2}
-                  value={prompt}
-                  onChange={(e) => setPrompt(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault()
-                      runAgent()
-                    }
-                  }}
-                />
-                <div className="flex flex-col gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => setThinkingMode((prev) => !prev)}
-                    className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border transition-colors ${
-                      thinkingMode
-                        ? "border-primary bg-primary/10 text-primary"
-                        : "border-border bg-secondary text-muted-foreground hover:text-foreground hover:bg-accent"
-                    }`}
-                    title={thinkingMode ? "Thinking mode ON" : "Thinking mode OFF"}
-                  >
-                    <Sparkles className="size-4" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={runAgent}
-                    disabled={isRunning || !prompt.trim()}
-                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-40 disabled:pointer-events-none"
-                  >
-                    {isRunning ? (
-                      <Loader2 className="size-4 animate-spin" />
-                    ) : (
-                      <Send className="size-4" />
-                    )}
-                  </button>
+              <div className="relative">
+                {showSlashMenu && (
+                  <div className="absolute bottom-full left-0 right-11 mb-2 rounded-lg border border-border bg-card/95 p-2 shadow-md">
+                    <div className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                      Commands
+                    </div>
+                    <div className="max-h-56 overflow-y-auto scrollbar-thin pr-1" onMouseLeave={hideSlashDescription}>
+                      <div className="relative space-y-1">
+                        <div
+                          className="pointer-events-none absolute left-0 right-0 rounded-md border border-primary/35 bg-primary/12 transform-gpu will-change-transform transition-transform duration-280 ease-[cubic-bezier(0.22,1,0.36,1)]"
+                          style={{
+                            height: `${SLASH_ROW_HEIGHT}px`,
+                            transform: `translateY(${activeSlashIndex * (SLASH_ROW_HEIGHT + SLASH_ROW_GAP)}px)`,
+                          }}
+                        />
+                        {filteredSlashCommands.map((item, index) => {
+                          const isActive = index === activeSlashIndex
+                          const showDelayedDescription = visibleSlashDescriptionFor === item.command
+                          return (
+                            <button
+                              key={item.command}
+                              type="button"
+                              onMouseDown={(e) => {
+                                e.preventDefault()
+                                insertSlashCommand(item)
+                              }}
+                              onMouseEnter={() => handleSlashOptionHover(index, item.command)}
+                              className={`relative z-10 h-8 w-full rounded-md px-2.5 text-left text-[12px] font-medium leading-none transition-colors duration-150 ${
+                                isActive
+                                  ? "text-foreground"
+                                  : "text-muted-foreground hover:text-foreground"
+                              }`}
+                            >
+                              {item.command}
+                              {showDelayedDescription && (
+                                <span className="pointer-events-none absolute left-2 right-2 bottom-[calc(100%+6px)] z-30 rounded-md border border-border bg-popover/95 px-2.5 py-1.5 text-[11px] font-medium leading-snug text-popover-foreground shadow-sm">
+                                  {item.description}
+                                </span>
+                              )}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                )}
+                <div className="flex items-end gap-2">
+                  <textarea
+                    ref={promptInputRef}
+                    className="flex-1 resize-none rounded-lg border border-border bg-secondary px-3 py-2 text-sm text-foreground outline-none transition placeholder:text-muted-foreground focus:ring-1 focus:ring-ring"
+                    placeholder="Ask something... (type / for commands)"
+                    rows={2}
+                    value={prompt}
+                    onChange={(e) => {
+                      setPrompt(e.target.value)
+                      setSlashDismissed(false)
+                      if (!e.target.value.trimStart().startsWith("/")) {
+                        hideSlashDescription()
+                      }
+                    }}
+                    onKeyDown={(e) => {
+                      if (showSlashMenu) {
+                        if (e.key === "ArrowDown") {
+                          e.preventDefault()
+                          hideSlashDescription()
+                          setSelectedSlashIndex((prev) => (prev + 1) % filteredSlashCommands.length)
+                          return
+                        }
+                        if (e.key === "ArrowUp") {
+                          e.preventDefault()
+                          hideSlashDescription()
+                          setSelectedSlashIndex((prev) =>
+                            prev === 0 ? filteredSlashCommands.length - 1 : prev - 1
+                          )
+                          return
+                        }
+                        if (e.key === "Enter" || e.key === "Tab") {
+                          e.preventDefault()
+                          const selected = filteredSlashCommands[selectedSlashIndex]
+                          if (selected) {
+                            insertSlashCommand(selected)
+                          }
+                          return
+                        }
+                        if (e.key === "Escape") {
+                          e.preventDefault()
+                          setSlashDismissed(true)
+                          hideSlashDescription()
+                          return
+                        }
+                      }
+
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault()
+                        if (!isRunningRef.current) {
+                          void runAgent()
+                        }
+                      }
+                    }}
+                  />
+                  <div className="flex flex-col gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!isRunningRef.current) {
+                          void runAgent()
+                        }
+                      }}
+                      disabled={isRunning || !prompt.trim()}
+                      className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-40 disabled:pointer-events-none"
+                    >
+                      {isRunning ? (
+                        <Loader2 className="size-4 animate-spin" />
+                      ) : (
+                        <Send className="size-4" />
+                      )}
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>

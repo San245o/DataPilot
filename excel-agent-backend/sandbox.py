@@ -14,6 +14,43 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 
+def _reshape_flat_values(values: list[Any], shape: Any) -> Any:
+    if shape is None:
+        return values
+
+    try:
+        if isinstance(shape, str):
+            dims = [int(part.strip()) for part in shape.split(",") if part.strip()]
+        elif isinstance(shape, (list, tuple)):
+            dims = [int(part) for part in shape]
+        else:
+            return values
+
+        if not dims:
+            return values
+
+        total = 1
+        for dim in dims:
+            total *= dim
+        if total != len(values):
+            return values
+
+        def _reshape(seq: list[Any], current_dims: list[int]) -> Any:
+            if len(current_dims) == 1:
+                return seq
+            chunk = 1
+            for dim in current_dims[1:]:
+                chunk *= dim
+            return [
+                _reshape(seq[i * chunk:(i + 1) * chunk], current_dims[1:])
+                for i in range(current_dims[0])
+            ]
+
+        return _reshape(values, dims)
+    except Exception:
+        return values
+
+
 def _df_to_records(df_obj: Any) -> list[dict[str, Any]]:
     # If the DataFrame has a custom index (like a pivot table), we MUST reset it so it becomes a column
     # Otherwise, to_dict("records") will drop the index entirely and the data looks broken on the frontend
@@ -41,7 +78,8 @@ def _sanitize_for_json(obj: Any) -> Any:
                     fmt, size = dtype_map[dtype]
                     count = len(raw) // size
                     values = list(struct.unpack(f"<{count}{fmt}", raw[:count * size]))
-                    return [_sanitize_for_json(v) for v in values]
+                    values = [_sanitize_for_json(v) for v in values]
+                    return _reshape_flat_values(values, obj.get("shape"))
             except Exception:
                 pass
         return {k: _sanitize_for_json(v) for k, v in obj.items()}
@@ -131,6 +169,12 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
 
     df = pd.DataFrame(rows)
     df.replace("", np.nan, inplace=True)
+
+    # Normalize leading/trailing whitespace in string-like cells to reduce fragile exact-match filters.
+    for col in df.columns:
+        if pd.api.types.is_object_dtype(df[col]):
+            df[col] = df[col].map(lambda v: v.strip() if isinstance(v, str) else v)
+
     original_df = df.copy()
     query_logs: list[str] = []
     query_table_rows: list[dict[str, Any]] | None = None
@@ -158,6 +202,34 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
         env["df"] = updated_df
         mutation_flag[0] = True
         return updated_df
+
+    def text_equals(column: str, value: str) -> pd.Series:
+        current_df = _get_df()
+        if column not in current_df.columns:
+            raise SandboxViolation(f"Column '{column}' does not exist")
+        needle = str(value).strip().casefold()
+        return current_df[column].astype(str).str.strip().str.casefold().eq(needle)
+
+    def text_contains(column: str, value: str) -> pd.Series:
+        current_df = _get_df()
+        if column not in current_df.columns:
+            raise SandboxViolation(f"Column '{column}' does not exist")
+        needle = str(value).strip()
+        return current_df[column].astype(str).str.contains(needle, case=False, na=False)
+
+    def to_numeric_clean(values: str | pd.Series) -> pd.Series:
+        current_df = _get_df()
+        if isinstance(values, str):
+            if values not in current_df.columns:
+                raise SandboxViolation(f"Column '{values}' does not exist")
+            series = current_df[values]
+        elif isinstance(values, pd.Series):
+            series = values
+        else:
+            raise SandboxViolation("to_numeric_clean expects a column name or pandas Series")
+
+        cleaned = series.astype(str).str.replace(r"[^0-9.+-]", "", regex=True)
+        return pd.to_numeric(cleaned, errors="coerce")
 
     def log_output(message: Any) -> None:
         nonlocal query_table_rows
@@ -371,6 +443,9 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
         "rename_column": rename_column,
         "table_to_csv": table_to_csv,
         "highlight_rows": highlight_rows,
+        "text_equals": text_equals,
+        "text_contains": text_contains,
+        "to_numeric_clean": to_numeric_clean,
     })
 
     exec(code, env, env)  # noqa: S102

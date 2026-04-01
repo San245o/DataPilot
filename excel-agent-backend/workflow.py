@@ -1,17 +1,42 @@
 from __future__ import annotations
 
 import random
+import re
 import traceback
 from typing import Any, Literal, TypedDict
 from uuid import uuid4
 
 from langgraph.graph import END, StateGraph
 
-from agent import generate_code, generate_fix, draft_final_reply
+from agent import generate_code, generate_fix
 from sandbox import run_sandboxed
 
-_MUTATION_KW = {'change', 'update', 'replace', 'rename', 'delete', 'add', 'edit', 'merge', 'set', 'modify', 'remove', 'fix', 'correct'}
+_MUTATION_KW = {
+    'change', 'update', 'replace', 'rename', 'delete', 'add', 'edit', 'merge', 'set', 'modify', 'remove', 'fix', 'correct',
+    'append', 'insert', 'sort', 'reorder', 'order by', 'arrange',
+    'add row', 'add rows', 'append row', 'append rows', 'insert row', 'insert rows',
+}
 _VIZ_KW = {'chart', 'plot', 'graph', 'pie', 'bar', 'scatter', 'visual', 'histogram', 'heatmap', 'line', 'bubble', 'trend'}
+_ROW_DELETE_KW = {
+    'delete row',
+    'delete rows',
+    'remove row',
+    'remove rows',
+    'drop row',
+    'drop rows',
+    'drop duplicate',
+    'drop duplicates',
+    'remove duplicate',
+    'remove duplicates',
+    'deduplicate',
+    'dedup',
+    'delete entries',
+    'remove entries',
+    'drop entries',
+    'delete items',
+    'remove items',
+    'drop items',
+}
 
 
 class AgentState(TypedDict, total=False):
@@ -53,6 +78,23 @@ def _is_mutation_only(prompt: str) -> bool:
     has_mutation = any(k in p for k in _MUTATION_KW)
     has_viz = any(k in p for k in _VIZ_KW)
     return has_mutation and not has_viz
+
+
+def _has_mutation_intent(prompt: str) -> bool:
+    p = prompt.lower()
+    return any(k in p for k in _MUTATION_KW)
+
+
+def _allows_row_deletion(prompt: str) -> bool:
+    p = prompt.lower()
+    if any(k in p for k in _ROW_DELETE_KW):
+        return True
+    return bool(
+        re.search(
+            r"\b(delete|remove|drop)\b[^\n]*\b(row|rows|record|records|duplicate|duplicates|movie|movies|item|items|entry|entries)\b",
+            p,
+        )
+    )
 
 
 def _prepare_context(state: AgentState) -> AgentState:
@@ -212,12 +254,29 @@ def _execute_code(state: AgentState) -> AgentState:
         table_request = state.get("table_request") or {"enabled": False, "title": "Query Table"}
         table_enabled = bool(table_request.get("enabled", False))
         table_title = str(table_request.get("title") or "Query Table").strip() or "Query Table"
+        prompt = state.get("prompt") or ""
+        action_type = (state.get("action_type") or "query").lower()
+        has_mutation_intent = _has_mutation_intent(prompt)
+        row_growth = len(result.rows) > len(rows)
+        is_mutation_action = action_type in ("mutation", "combined") or has_mutation_intent or row_growth
+        row_deletion_blocked = len(result.rows) < len(rows) and not _allows_row_deletion(prompt)
+
+        mutation_applied = bool(result.mutation and is_mutation_action and not row_deletion_blocked)
+        final_rows = result.rows if mutation_applied else rows
+
+        query_output = result.query_output
+        if row_deletion_blocked:
+            guard_note = (
+                "Safety guard: row deletions were ignored because the prompt did not explicitly ask to "
+                "delete, drop, or remove rows."
+            )
+            query_output = f"{query_output}\n\n{guard_note}" if query_output else guard_note
 
         query_tables: list[dict[str, Any]] = []
-        if table_enabled and not result.mutation:
+        if table_enabled and not mutation_applied:
             table_rows = result.query_table_rows or []
-            if not table_rows and result.rows:
-                table_rows = result.rows[:50]
+            if not table_rows and final_rows:
+                table_rows = final_rows[:50]
             if table_rows:
                 query_tables = [{
                     "id": uuid4().hex,
@@ -226,12 +285,12 @@ def _execute_code(state: AgentState) -> AgentState:
                 }]
 
         return {
-            "result_rows": result.rows,
+            "result_rows": final_rows,
             "visualization": result.visualization,
-            "query_output": result.query_output,
+            "query_output": query_output,
             "query_table_rows": result.query_table_rows,
             "query_tables": query_tables,
-            "mutation": result.mutation,
+            "mutation": mutation_applied,
             "highlight_indices": result.highlight_indices,
             "error": None,
         }
@@ -286,41 +345,86 @@ def _fix_code(state: AgentState) -> AgentState:
         }
 
 
-def _needs_final_reply(query_output: str | None, action_type: str | None) -> bool:
-    """Determine if we need a second LLM call to interpret results."""
-    if (action_type or "query") in ("mutation", "visualization"):
-        return False
-    if not query_output or len(query_output.strip()) < 10:
-        return False
-    return True
+def _extract_safety_notes(query_output: str) -> str:
+    lines = [line.strip() for line in query_output.splitlines() if line.strip()]
+    notes = [line for line in lines if line.lower().startswith("safety guard:")]
+    return "\n".join(notes)
 
 
-def _draft_final_reply(state: AgentState) -> AgentState:
-    try:
-        result = draft_final_reply(
-            prompt=state.get("prompt") or "",
-            model_name=state.get("model") or "gemini-2.0-flash",
-            query_output=state.get("query_output"),
-            initial_reply=state.get("assistant_reply") or "",
-        )
+def _compact_query_output(query_output: str, max_lines: int = 8, max_chars: int = 700) -> str:
+    lines = [line.strip() for line in query_output.splitlines() if line.strip()]
+    if not lines:
+        return ""
 
-        cur = state.get("token_usage") or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-        new = result.get("token_usage") or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-        merged = {
-            "prompt_tokens": (cur.get("prompt_tokens") or 0) + (new.get("prompt_tokens") or 0),
-            "completion_tokens": (cur.get("completion_tokens") or 0) + (new.get("completion_tokens") or 0),
-            "total_tokens": (cur.get("total_tokens") or 0) + (new.get("total_tokens") or 0),
-        }
+    dataframe_line = next((line for line in lines if line.startswith("[DataFrame:")), "")
+    compact_lines: list[str] = []
 
-        return {
-            "assistant_reply": result.get("reply") or state.get("assistant_reply") or "Done.",
-            "token_usage": merged,
-        }
-    except Exception as e:
-        # If drafting fails, keep the original reply
-        return {
-            "assistant_reply": state.get("assistant_reply") or "Done.",
-        }
+    if dataframe_line:
+        compact_lines.append(dataframe_line)
+
+    for line in lines:
+        if line == dataframe_line:
+            continue
+        if line.lower().startswith("showing first"):
+            continue
+        if re.match(r"^\d+\s", line):
+            continue
+        compact_lines.append(line)
+        if len(compact_lines) >= max_lines:
+            break
+
+    if not compact_lines:
+        compact_lines = lines[:max_lines]
+
+    text = "\n".join(compact_lines)
+    if len(text) > max_chars:
+        text = text[:max_chars].rstrip() + "\n... [truncated]"
+    return text
+
+
+def _compose_assistant_reply(state: AgentState) -> AgentState:
+    """Compose final assistant reply without calling the model again.
+
+    This keeps the workflow single-hop for normal query execution:
+    query -> sandbox -> final response.
+    """
+    reply = (state.get("assistant_reply") or "Done.").strip()
+    query_output = (state.get("query_output") or "").strip()
+    action_type = (state.get("action_type") or "query").lower()
+
+    if not query_output:
+        return {"assistant_reply": reply}
+
+    safety_notes = _extract_safety_notes(query_output)
+    reply_lower = reply.lower()
+    is_generic_reply = reply_lower in {"done", "done.", "completed", "completed."} or len(reply) < 16
+
+    # For chart-focused requests, avoid dumping table previews into chat.
+    if action_type in ("visualization", "combined"):
+        if safety_notes and safety_notes.lower() not in reply_lower:
+            if reply:
+                return {"assistant_reply": f"{reply}\n\n{safety_notes}"}
+            return {"assistant_reply": safety_notes}
+        return {"assistant_reply": reply}
+
+    # For normal query replies that are already informative, keep response concise.
+    if not is_generic_reply:
+        if safety_notes and safety_notes.lower() not in reply_lower:
+            return {"assistant_reply": f"{reply}\n\n{safety_notes}"}
+        return {"assistant_reply": reply}
+
+    output_excerpt = _compact_query_output(query_output)
+    if not output_excerpt:
+        return {"assistant_reply": reply}
+
+    if output_excerpt.lower() in reply.lower():
+        combined = reply
+    elif reply:
+        combined = f"{reply}\n\n{output_excerpt}"
+    else:
+        combined = output_excerpt
+
+    return {"assistant_reply": combined}
 
 
 def _format_error_reply(state: AgentState) -> AgentState:
@@ -334,12 +438,7 @@ def _format_error_reply(state: AgentState) -> AgentState:
     }
 
 
-def _should_draft_final(state: AgentState) -> AgentState:
-    """Pass-through node for conditional routing."""
-    return {}
-
-
-def _route_after_execute(state: AgentState) -> Literal["fix_code", "format_error", "should_draft_final"]:
+def _route_after_execute(state: AgentState) -> Literal["fix_code", "format_error", "compose_assistant_reply"]:
     error = state.get("error")
     retry_count = state.get("retry_count") or 0
 
@@ -348,16 +447,7 @@ def _route_after_execute(state: AgentState) -> Literal["fix_code", "format_error
             return "fix_code"
         else:
             return "format_error"
-    return "should_draft_final"
-
-
-def _route_after_should_draft(state: AgentState) -> Literal["draft_final_reply", "__end__"]:
-    query_output = state.get("query_output")
-    action_type = state.get("action_type")
-
-    if _needs_final_reply(query_output, action_type):
-        return "draft_final_reply"
-    return "__end__"
+    return "compose_assistant_reply"
 
 
 def build_workflow():
@@ -369,8 +459,7 @@ def build_workflow():
     g.add_node("execute_code", _execute_code)
     g.add_node("fix_code", _fix_code)
     g.add_node("format_error", _format_error_reply)
-    g.add_node("should_draft_final", _should_draft_final)
-    g.add_node("draft_final_reply", _draft_final_reply)
+    g.add_node("compose_assistant_reply", _compose_assistant_reply)
 
     # Set entry point
     g.set_entry_point("prepare_context")
@@ -386,7 +475,7 @@ def build_workflow():
         {
             "fix_code": "fix_code",
             "format_error": "format_error",
-            "should_draft_final": "should_draft_final",
+            "compose_assistant_reply": "compose_assistant_reply",
         },
     )
 
@@ -396,17 +485,7 @@ def build_workflow():
     # Error formatting ends
     g.add_edge("format_error", END)
 
-    # Conditional after should_draft_final
-    g.add_conditional_edges(
-        "should_draft_final",
-        _route_after_should_draft,
-        {
-            "draft_final_reply": "draft_final_reply",
-            "__end__": END,
-        },
-    )
-
-    # Final reply ends
-    g.add_edge("draft_final_reply", END)
+    # Compose final response and end.
+    g.add_edge("compose_assistant_reply", END)
 
     return g.compile()

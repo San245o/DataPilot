@@ -4,7 +4,6 @@ import ast
 import json
 import os
 import re
-import warnings
 from typing import Any
 
 import google.generativeai as genai
@@ -21,6 +20,9 @@ HELPERS:
 - print_query('filter_expr') - filter df with query string like 'Price>100'
 - print_table(max_rows=10) - show df snapshot
 - highlight_rows(indices) - pass a list of ALL matching indices (do not truncate or slice the list)
+- text_equals(column, value) - case-insensitive exact match with stripped whitespace
+- text_contains(column, value) - case-insensitive contains match
+- to_numeric_clean(column_or_series) - strips currency/non-numeric chars then converts with pd.to_numeric(errors='coerce')
 - Mutations: To add rows use `df = pd.concat([df, pd.DataFrame([...])], ignore_index=True)`. Do NOT use `df.append()`! edit_cell(row,col,val), add_column(name), delete_column(name), rename_column(old,new), delete_row(idx)
 
 PATTERNS:
@@ -32,12 +34,24 @@ D) Mutation: df['Col']=df['Col'].str.replace('old','new'); result_df=df
 RULES:
 - Single quotes in code, pass DataFrames directly to log_output for rendering, handle NaN with dropna/fillna
 - String match: .str.contains('x',case=False,na=False)
+- Never use direct case-sensitive equality for user-provided text filters (e.g., Item == 'smoothie'). Use text_equals('Item', 'smoothie') or .astype(str).str.strip().str.casefold().eq('smoothie').
+- For money/revenue totals, prefer amount columns like 'Total Spent', 'Total_Spent', 'Amount', 'Revenue' and parse with to_numeric_clean(...).fillna(0) before sum.
 - Charts: assign to fig, never call fig.show/to_html/to_json
+- Never delete/drop/remove/filter out rows unless the user explicitly asks to delete/drop/remove rows (or duplicates). If not explicitly requested, preserve the original row count.
+- If you mutate data (add/delete/update rows, append multiple rows, sort/reorder rows, or modify columns), set action_type='mutation' unless a chart is also requested, then use action_type='combined'.
+- For query/visualization requests, never replace `df` or `result_df` with a filtered subset; use print_query/log_output/highlight_rows and keep `result_df=df`.
 - For structural MUTATIONS (add/drop columns/rows, clean datatypes): Modify `df` directly, return `result_df=df`, and set `table_request.enabled=False`. Do NOT create separate tables for this.
 - For FINDING/SEARCHING (e.g. "find all students"): Use `highlight_rows(df[mask].index.tolist())`. Do NOT use `table_request.enabled=True` unless specifically asked to separate it.
 - For LISTING/PRINTING (e.g. "list the top 5 students"): If the result has < 10 rows, format the output as a bulleted markdown list in `assistant_reply` (do NOT use tables or df.to_markdown()). If the result has >= 10 rows, do NOT include the text in chat; instead, use `highlight_rows()` to show the result in the main table. Always set `table_request.enabled=False`.
 - For EXTRACTIONS/PIVOTS (e.g. "pivot table", "extract to new table"): Create a subset df, pass it via `log_output(subset_df)`, and set `table_request.enabled=True`.
 - table_request.title MUST be very short (max 3-5 words), e.g., "Low Involvement".
+"""
+
+JSON_OUTPUT_CONTRACT = """STRICT OUTPUT CONTRACT:
+- Return exactly one JSON object only.
+- No markdown, no code fences, no extra commentary.
+- Required keys: code, assistant_reply, action_type, table_request.
+- table_request must include enabled (bool) and title (string).
 """
 
 VIZ_RULES = """
@@ -54,6 +68,11 @@ PIE: fig=px.pie(values=counts.values,names=counts.index,template='plotly_dark')
 fig.update_traces(textinfo='percent',hoverinfo='label+value+percent')
 
 SCATTER: fig=px.scatter(df,x='X',y='Y',template='plotly_dark',hover_data=['Name'])
+
+HEATMAP MATRIX RULE:
+- If data already has a metric/count column (e.g., accident_count, total, amount, revenue), aggregate with sum on that column.
+- Only use groupby(...).size() when each row is a raw event and no metric/count column exists.
+- Prefer pivot_table(values='metric_col', index='row_cat', columns='col_cat', aggfunc='sum', fill_value=0)
 """
 
 MERGE_RULES = """
@@ -83,7 +102,11 @@ _MERGE_KW = {'merge', 'join', 'combine tables', 'match records', 'link'}
 _STATS_KW = {'outlier', 'significance', 'p-value', 'statistical', 'std', 'variance', 'regression', 'quartile'}
 _CORR_KW = {'correlation', 'correlate', 'corr matrix', 'relationship between'}
 _TIME_KW = {'over time', 'by year', 'by month', 'by date', 'forecast', 'time series', 'yearly', 'monthly', 'daily'}
-_MUTATION_KW = {'change', 'update', 'replace', 'rename', 'delete', 'add', 'edit', 'merge', 'set', 'modify', 'remove', 'fix', 'correct', 'convert'}
+_MUTATION_KW = {
+    'change', 'update', 'replace', 'rename', 'delete', 'add', 'edit', 'merge', 'set', 'modify', 'remove', 'fix', 'correct', 'convert',
+    'append', 'insert', 'sort', 'reorder', 'order by', 'arrange',
+    'add row', 'add rows', 'append row', 'append rows', 'insert row', 'insert rows',
+}
 _TABLE_INTENT_KW = {
     'separate table',
     'another table',
@@ -210,13 +233,22 @@ def _invoke_model(*, model_name: str, system_prompt: str, user_message: str) -> 
         )
 
         messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_message}]
+        request_payload = {
+            "model": model_name,
+            "messages": messages,
+            "temperature": 0,
+            "max_tokens": 8192,
+        }
         try:
+            # Prefer strict JSON mode when supported by the model.
             response = client.chat.completions.create(
-                model=model_name,
-                messages=messages,
-                temperature=0,
-                max_tokens=8192
+                **request_payload,
+                response_format={"type": "json_object"},
             )
+        except Exception:
+            response = client.chat.completions.create(**request_payload)
+
+        try:
             raw = response.choices[0].message.content or ""
             if not raw.strip():
                 raise ValueError("No content received from NVIDIA NIM model")
@@ -234,7 +266,16 @@ def _invoke_model(*, model_name: str, system_prompt: str, user_message: str) -> 
         raise RuntimeError("GEMINI_API_KEY not set")
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(model_name or "gemini-2.0-flash")
-    response = model.generate_content([system_prompt, user_message])
+    generation_config: dict[str, Any] = {"temperature": 0}
+    if (model_name or "").startswith("gemini"):
+        generation_config["response_mime_type"] = "application/json"
+
+    try:
+        response = model.generate_content([system_prompt, user_message], generation_config=generation_config)
+    except Exception:
+        # Fall back to basic generation if a model does not support response MIME controls.
+        response = model.generate_content([system_prompt, user_message], generation_config={"temperature": 0})
+
     raw = response.text or ""
     if hasattr(response, "usage_metadata") and response.usage_metadata:
         usage["prompt_tokens"] = response.usage_metadata.prompt_token_count
@@ -310,7 +351,7 @@ def generate_code(
     if trimmed_history:
         ctx.append(f"History: {json.dumps(trimmed_history)}")
 
-    ctx.append("\nReturn valid JSON only.")
+    ctx.append(JSON_OUTPUT_CONTRACT)
 
     user_message = "\n".join(ctx)
     raw, usage = _invoke_model(model_name=model_name, system_prompt=system_prompt, user_message=user_message)
@@ -370,9 +411,11 @@ ERROR: {error_message}
 
 COMMON FIXES:
 - print_query() takes a FILTER STRING like 'Price > 100', NOT a variable name
-- To log a computed DataFrame/Series, use: log_output(my_var.to_string())
+- To log a computed DataFrame/Series, use: log_output(my_var)
 - Ensure variables are defined before use
 - Use single quotes for strings
+
+{JSON_OUTPUT_CONTRACT}
 
 Return fixed JSON."""
 

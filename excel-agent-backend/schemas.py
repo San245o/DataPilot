@@ -49,9 +49,3 @@ class AgentResponse(BaseModel):
     mutation: bool = False
     highlight_indices: list[int] = Field(default_factory=list)
     token_usage: TokenUsage | None = None
-
-
-class StreamEvent(BaseModel):
-    """Server-sent event for streaming progress"""
-    event: str  # "step" | "result" | "error"
-    data: dict[str, Any]
