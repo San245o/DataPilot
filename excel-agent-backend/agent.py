@@ -13,7 +13,7 @@ SYSTEM_PROMPT_BASE = """You are a data analysis agent using pandas and plotly.
 RESPONSE FORMAT - Return ONLY valid JSON (no markdown):
 {"code": "python code", "assistant_reply": "markdown response", "action_type": "query|mutation|visualization|combined", "table_request": {"enabled": false, "title": ""}}
 
-ENV: df (DataFrame), pd, np, px, go pre-loaded. NO imports. End with result_df=df.
+ENV: df (DataFrame), pd, np, px, go, re, pre-loaded. NO imports. End with result_df=df.
 
 HELPERS:
 - log_output(msg) - log text or pass a DataFrame/Series directly (e.g. log_output(df)) to populate the UI table. Do NOT use .to_string() for tables!
@@ -158,15 +158,46 @@ def _wants_separate_table(prompt: str) -> bool:
     return any(k in p for k in _TABLE_INTENT_KW)
 
 
+def _extract_first_object(text: str) -> str:
+    start = text.find('{')
+    if start == -1:
+        return text
+
+    depth = 0
+    in_string = False
+    quote_char = ''
+    escaped = False
+
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == '\\':
+                escaped = True
+            elif ch == quote_char:
+                in_string = False
+            continue
+
+        if ch in ('"', "'"):
+            in_string = True
+            quote_char = ch
+        elif ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+
+    return text[start:]
+
+
 def _extract_json(raw: str) -> dict[str, Any]:
     text = raw.strip()
     m = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
     if m:
         text = m.group(1).strip()
-    start = text.find('{')
-    end = text.rfind('}')
-    if start != -1 and end != -1:
-        text = text[start:end+1]
+    text = _extract_first_object(text)
 
     # First attempt: strict JSON.
     try:
@@ -177,15 +208,53 @@ def _extract_json(raw: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         pass
 
+    # Second attempt: repair common malformed JSON issues.
+    try:
+        repaired_json = text.replace("\u201c", '"').replace("\u201d", '"').replace("\u2019", "'")
+        repaired_json = repaired_json.replace("\\\r\n", "\\n").replace("\\\n", "\\n")
+        repaired_json = re.sub(r",\s*([}\]])", r"\1", repaired_json)
+        payload = json.loads(repaired_json)
+        if not isinstance(payload, dict):
+            raise ValueError("Expected JSON object")
+        return payload
+    except Exception:
+        pass
+
     # Fallback for models that return Python-like dicts with single quotes.
     try:
         repaired = text.replace("\u201c", '"').replace("\u201d", '"').replace("\u2019", "'")
+        repaired = repaired.replace("\\\r\n", "\\n").replace("\\\n", "\\n")
         payload = ast.literal_eval(repaired)
         if not isinstance(payload, dict):
             raise ValueError("Expected JSON object")
         return payload
     except Exception as exc:
         raise ValueError(f"Invalid model JSON response: {exc}") from exc
+
+
+def _parse_model_response(raw: str) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    try:
+        candidate = _extract_json(raw)
+        if isinstance(candidate, dict):
+            payload = candidate
+    except Exception:
+        payload = {}
+
+    code = payload.get("code")
+    if isinstance(code, str) and code.strip():
+        return payload
+
+    text = (raw or "").strip()
+    block = re.search(r"```(?:python|py)?\s*([\s\S]*?)```", text, flags=re.IGNORECASE)
+    if block and block.group(1).strip():
+        payload["code"] = block.group(1).strip()
+        return payload
+
+    if "result_df" in text and ("df" in text or "log_output" in text or "print_query" in text):
+        payload["code"] = text
+
+    return payload
 
 
 def _invoke_model(*, model_name: str, system_prompt: str, user_message: str) -> tuple[str, dict[str, int]]:
@@ -220,7 +289,7 @@ def _invoke_model(*, model_name: str, system_prompt: str, user_message: str) -> 
             usage["total_tokens"] = response.usage.total_tokens
         return raw, usage
 
-    if model_name and (model_name.startswith("minimax") or model_name.startswith("google/codegemma") or model_name.startswith("meta/")):
+    if model_name and (model_name.startswith("minimax") or model_name.startswith("meta/")):
         from openai import OpenAI
 
         nvidia_api_key = os.getenv("NVIDIA_API_KEY")
@@ -265,9 +334,10 @@ def _invoke_model(*, model_name: str, system_prompt: str, user_message: str) -> 
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY not set")
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(model_name or "gemini-2.0-flash")
+    model = genai.GenerativeModel(model_name or "gemini-3.1-flash-lite-preview")
     generation_config: dict[str, Any] = {"temperature": 0}
-    if (model_name or "").startswith("gemini"):
+    # Enable JSON mode for Gemini models.
+    if (model_name or "").startswith("gemini") or (model_name or "").startswith("models/gemini"):
         generation_config["response_mime_type"] = "application/json"
 
     try:
@@ -356,7 +426,7 @@ def generate_code(
     user_message = "\n".join(ctx)
     raw, usage = _invoke_model(model_name=model_name, system_prompt=system_prompt, user_message=user_message)
 
-    payload = _extract_json(raw)
+    payload = _parse_model_response(raw)
     code = payload.get("code", "")
     reply = payload.get("assistant_reply", "Done.")
     action = payload.get("action_type", "query")
@@ -371,8 +441,15 @@ def generate_code(
         if table_title == "Query Table":
             table_title = "Extracted Table"
 
+    # Deterministic fallback keeps execution functional.
     if not isinstance(code, str) or not code.strip():
-        raise ValueError("No valid code returned")
+        code = "print_table(max_rows=10)\nresult_df=df"
+        if not isinstance(reply, str) or not reply.strip():
+            reply = "I could not generate transformation code reliably, so I returned a snapshot of the current data."
+        action = "query"
+        table_enabled = False
+        table_title = "Query Table"
+
     if not isinstance(reply, str):
         reply = "Done."
     if action not in ("query", "mutation", "visualization", "combined"):
@@ -421,7 +498,7 @@ Return fixed JSON."""
 
     raw, usage = _invoke_model(model_name=model_name, system_prompt=system_prompt, user_message=user_message)
 
-    payload = _extract_json(raw)
+    payload = _parse_model_response(raw)
     code = payload.get("code", "")
     reply = payload.get("assistant_reply", "Done.")
     action = payload.get("action_type", "query")
@@ -437,7 +514,11 @@ Return fixed JSON."""
             table_title = "Extracted Table"
 
     if not isinstance(code, str) or not code.strip():
-        raise ValueError("No valid code in fix")
+        code = original_code if isinstance(original_code, str) and original_code.strip() else "print_table(max_rows=10)\nresult_df=df"
+        if not isinstance(reply, str) or not reply.strip():
+            reply = "I could not produce a reliable fix; retrying with the previous code."
+        action = "query"
+
     if action not in ("query", "mutation", "visualization", "combined"):
         action = "query"
 
@@ -505,7 +586,7 @@ Never output markdown or ASCII tables in this response."""
         if not api_key:
             return {"reply": initial_reply, "token_usage": usage}
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(model_name or "gemini-2.0-flash")
+        model = genai.GenerativeModel(model_name or "gemini-3.1-flash-lite-preview")
         try:
             response = model.generate_content([
                 "Summarize data results clearly and concisely. Do not output markdown or ASCII tables.",

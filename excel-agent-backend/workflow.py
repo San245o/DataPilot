@@ -204,7 +204,7 @@ def _generate_code(state: AgentState) -> AgentState:
     try:
         result = generate_code(
             prompt=state.get("prompt") or "",
-            model_name=state.get("model") or "gemini-2.0-flash",
+            model_name=state.get("model") or "gemini-3.1-flash-lite-preview",
             columns=state.get("columns") or [],
             dtypes=state.get("dtypes") or {},
             nulls=state.get("nulls") or {},
@@ -314,7 +314,7 @@ def _fix_code(state: AgentState) -> AgentState:
     try:
         result = generate_fix(
             prompt=state.get("prompt") or "",
-            model_name=state.get("model") or "gemini-2.0-flash",
+            model_name=state.get("model") or "gemini-3.1-flash-lite-preview",
             columns=state.get("columns") or [],
             dtypes=state.get("dtypes") or {},
             original_code=state.get("code") or "",
@@ -339,9 +339,11 @@ def _fix_code(state: AgentState) -> AgentState:
             "error": None,
         }
     except Exception as e:
+        # Keep the original execution error so users see the real failure,
+        # not a secondary "fix generation" failure.
         return {
             "retry_count": retry,
-            "error": f"Failed to fix code: {e}",
+            "error": state.get("error") or str(e),
         }
 
 
@@ -432,8 +434,19 @@ def _format_error_reply(state: AgentState) -> AgentState:
     # Clean up error message for display
     if "Execution error:" in error:
         error = error.replace("Execution error: ", "")
+    guidance = "Please try rephrasing your request or check if the column names are correct."
+    if "invalid model json response" in error.lower():
+        guidance = (
+            "The selected model returned malformed structured output. "
+            "Please retry, or switch to another available model."
+        )
+    elif "no valid code returned" in error.lower() or "no valid code in fix" in error.lower():
+        guidance = (
+            "The selected model returned an incomplete structured response (missing code). "
+            "Please retry, or switch to another available model."
+        )
     return {
-        "assistant_reply": f"I encountered an error: {error}\n\nPlease try rephrasing your request or check if the column names are correct.",
+        "assistant_reply": f"I encountered an error: {error}\n\n{guidance}",
         "result_rows": state.get("rows") or [],
     }
 

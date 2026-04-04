@@ -12,7 +12,7 @@ class AgentRequest(BaseModel):
     prompt: str
     rows: list[dict[str, Any]] = Field(default_factory=list)
     dataset_id: str | None = None
-    model: str = "gemini-2.0-flash"
+    model: str = "gemini-3.1-flash-lite-preview"
     history: list[ChatMessage] = Field(default_factory=list)
 
 

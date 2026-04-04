@@ -312,7 +312,7 @@ function normalizeRows(rows: Record<string, unknown>[]): SheetRow[] {
 export function AgentDashboard() {
   const [rows, setRows] = useState<SheetRow[]>(seedRows)
   const [datasetName, setDatasetName] = useState("gapminder-lite.xlsx")
-  const [modelName, setModelName] = useState("gemini-3-flash-preview")
+  const [modelName, setModelName] = useState("gemini-3.1-flash-lite-preview")
   const [prompt, setPrompt] = useState("")
   const [isRunning, setIsRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -352,6 +352,7 @@ export function AgentDashboard() {
   const tableContainerRef = useRef<HTMLDivElement | null>(null)
   const mainContentRef = useRef<HTMLDivElement | null>(null)
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null)
+  const slashListRef = useRef<HTMLDivElement | null>(null)
   const slashDescriptionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const isRunningRef = useRef(false)
   const slashQuery = useMemo(() => getActiveSlashQuery(prompt), [prompt])
@@ -428,6 +429,14 @@ export function AgentDashboard() {
   }, [clearSlashDescriptionTimer])
   const tableRows = isBaseDataTab ? rows : (activePivotTable?.rows ?? rows)
   const headers = useMemo(() => Object.keys(tableRows[0] ?? {}), [tableRows])
+  const baseShapeLabel = useMemo(() => {
+    const baseColumnCount = Object.keys(rows[0] ?? {}).length
+    return `${rows.length}X${baseColumnCount}`
+  }, [rows])
+  const tableShapeLabel = useMemo(
+    () => `${tableRows.length}X${headers.length}`,
+    [tableRows.length, headers.length]
+  )
 
   // Virtualization state
   const [scrollTop, setScrollTop] = useState(0)
@@ -618,6 +627,9 @@ export function AgentDashboard() {
 
     try {
       const storageKey = `datapilot:chart:${widget.id}:${Date.now()}`
+      const targetUrl = `/chart-viewer?chartKey=${encodeURIComponent(storageKey)}`
+
+      const popup = window.open("about:blank", "_blank")
       localStorage.setItem(
         storageKey,
         JSON.stringify({
@@ -628,14 +640,11 @@ export function AgentDashboard() {
         })
       )
 
-      const popup = window.open(
-        `/chart-viewer?chartKey=${encodeURIComponent(storageKey)}`,
-        "_blank",
-        "noopener,noreferrer"
-      )
-
-      if (!popup) {
-        setError("Popup was blocked. Allow popups for this site to open charts in a new tab.")
+      if (popup) {
+        popup.location.href = targetUrl
+      } else {
+        // Fallback when popup is blocked: continue in current tab.
+        window.location.href = targetUrl
       }
     } catch {
       setError("Unable to open chart in a new tab.")
@@ -984,31 +993,6 @@ export function AgentDashboard() {
 
   return (
     <div className="flex h-dvh flex-col overflow-hidden bg-background text-foreground font-sans antialiased">
-      {/* Header */}
-      <header className="flex h-12 shrink-0 items-center justify-between border-b border-border bg-card/80 px-4 backdrop-blur-sm">
-        <div className="flex items-center gap-2.5">
-          <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-primary-foreground">
-            <FileSpreadsheet className="size-4" />
-          </div>
-          <h1 className="text-sm font-bold tracking-tight text-foreground">
-            Data Pilot
-          </h1>
-        </div>
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <div className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
-            <span className="font-medium">{rows.length} rows</span>
-          </div>
-          <button
-            type="button"
-            onClick={toggleTheme}
-            className="flex h-7 w-7 items-center justify-center rounded-md border border-border bg-secondary text-muted-foreground transition-colors hover:text-foreground hover:bg-accent"
-          >
-            {isDark ? <Sun className="size-3.5" /> : <Moon className="size-3.5" />}
-          </button>
-        </div>
-      </header>
-
       {/* Main Layout */}
       <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* Sidebar */}
@@ -1018,14 +1002,33 @@ export function AgentDashboard() {
           }`}
         >
           {/* Sidebar toggle */}
-          <div className="flex h-10 items-center justify-end px-2 border-b border-border">
+          <div className="flex h-10 items-center justify-end px-2 border-b border-border px-2">
             <button
               type="button"
               onClick={() => setSidebarCollapsed((prev) => !prev)}
-              className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+              className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
             >
               {sidebarCollapsed ? <ChevronRight className="size-3.5" /> : <ChevronLeft className="size-3.5" />}
             </button>
+          </div>
+
+          {/* Sidebar brand */}
+          <div className="border-b border-border px-2 py-2">
+            <div className={`flex items-center gap-2.5 rounded-lg px-2 py-1.5 ${sidebarCollapsed ? "justify-center" : ""}`}>
+              <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-primary-foreground shrink-0">
+                <FileSpreadsheet className="size-4" />
+              </div>
+              {!sidebarCollapsed && (
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-bold tracking-tight text-foreground">DataPilot</div>
+                  <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                    <div className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                    <span className="font-medium">{baseShapeLabel}</span>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* File upload & download */}
@@ -1139,6 +1142,18 @@ export function AgentDashboard() {
                 </div>
               )
             })}
+
+            <button
+              type="button"
+              onClick={toggleTheme}
+              className={`w-full flex items-center gap-2.5 rounded-md px-2.5 py-2 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground ${
+                sidebarCollapsed ? "justify-center" : ""
+              }`}
+              title={isDark ? "Switch to light mode" : "Switch to dark mode"}
+            >
+              {isDark ? <Sun className="size-3.5 shrink-0" /> : <Moon className="size-3.5 shrink-0" />}
+              {!sidebarCollapsed && <span className="font-medium">{isDark ? "Light mode" : "Dark mode"}</span>}
+            </button>
           </div>
 
           {/* Model selector at bottom */}
@@ -1158,7 +1173,6 @@ export function AgentDashboard() {
                 <option value="gpt-4o">GPT-4o (GitHub Models)</option>
                 <option value="minimaxai/minimax-m2.5">Minimax m2.5</option>
                 <option value="meta/llama-3.1-405b-instruct">Llama 3.1 405B (NVIDIA)</option>
-                <option value="google/codegemma-1.1-7b">CodeGemma 7B (NVIDIA)</option>
               </select>
             </div>
           )}
@@ -1297,7 +1311,7 @@ export function AgentDashboard() {
                       </button>
                     </div>
                   )}
-                  <span className="text-[10px] text-muted-foreground">{headers.length} columns</span>
+                  <span className="text-[10px] text-muted-foreground">{tableShapeLabel}</span>
                   <button
                     type="button"
                     onClick={() => setFullscreenPanel(fullscreenPanel === "data" ? null : "data")}
@@ -1650,7 +1664,7 @@ export function AgentDashboard() {
             {/* Error */}
             {error && (
               <div className="mx-3 mb-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive flex justify-between items-center">
-                <span>Error occurred</span>
+                <span>{error}</span>
                 <button
                    onClick={() => setError(null)}
                    className="text-destructive hover:text-destructive/80 transition-colors"
@@ -1665,10 +1679,10 @@ export function AgentDashboard() {
               <div className="relative">
                 {showSlashMenu && (
                   <div className="absolute bottom-full left-0 right-11 mb-2 rounded-lg border border-border bg-card/95 p-2 shadow-md">
-                    <div className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    <div className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground space-y-1">
                       Commands
                     </div>
-                    <div className="max-h-56 overflow-y-auto scrollbar-thin pr-1" onMouseLeave={hideSlashDescription}>
+                    <div ref={slashListRef} className="max-h-56 overflow-y-auto scrollbar-thin pr-1" onMouseLeave={hideSlashDescription}>
                       <div className="relative space-y-1">
                         <div
                           className="pointer-events-none absolute left-0 right-0 rounded-md border border-primary/35 bg-primary/12 transform-gpu will-change-transform transition-transform duration-280 ease-[cubic-bezier(0.22,1,0.36,1)]"
@@ -1708,7 +1722,7 @@ export function AgentDashboard() {
                     </div>
                   </div>
                 )}
-                <div className="flex items-end gap-2">
+                <div className="flex items-center gap-2">
                   <textarea
                     ref={promptInputRef}
                     className="flex-1 resize-none rounded-lg border border-border bg-secondary px-3 py-2 text-sm text-foreground outline-none transition placeholder:text-muted-foreground focus:ring-1 focus:ring-ring"
@@ -1727,15 +1741,29 @@ export function AgentDashboard() {
                         if (e.key === "ArrowDown") {
                           e.preventDefault()
                           hideSlashDescription()
-                          setSelectedSlashIndex((prev) => (prev + 1) % filteredSlashCommands.length)
+                          setSelectedSlashIndex((prev) => {
+                            const next = (prev + 1) % filteredSlashCommands.length;
+                            const container = slashListRef.current;
+                            if (container) {
+                              const el = container.querySelector(`button:nth-child(${next + 2})`) as HTMLElement;
+                              if (el) el.scrollIntoView({ block: "nearest" });
+                            }
+                            return next;
+                          })
                           return
                         }
                         if (e.key === "ArrowUp") {
                           e.preventDefault()
                           hideSlashDescription()
-                          setSelectedSlashIndex((prev) =>
-                            prev === 0 ? filteredSlashCommands.length - 1 : prev - 1
-                          )
+                          setSelectedSlashIndex((prev) => {
+                            const next = prev === 0 ? filteredSlashCommands.length - 1 : prev - 1;
+                            const container = slashListRef.current;
+                            if (container) {
+                              const el = container.querySelector(`button:nth-child(${next + 2})`) as HTMLElement;
+                              if (el) el.scrollIntoView({ block: "nearest" });
+                            }
+                            return next;
+                          })
                           return
                         }
                         if (e.key === "Enter" || e.key === "Tab") {
@@ -1762,24 +1790,22 @@ export function AgentDashboard() {
                       }
                     }}
                   />
-                  <div className="flex flex-col gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (!isRunningRef.current) {
-                          void runAgent()
-                        }
-                      }}
-                      disabled={isRunning || !prompt.trim()}
-                      className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-40 disabled:pointer-events-none"
-                    >
-                      {isRunning ? (
-                        <Loader2 className="size-4 animate-spin" />
-                      ) : (
-                        <Send className="size-4" />
-                      )}
-                    </button>
-                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!isRunningRef.current) {
+                        void runAgent()
+                      }
+                    }}
+                    disabled={isRunning || !prompt.trim()}
+                    className="flex h-9 w-9 shrink-0 items-center justify-center self-center rounded-lg bg-primary text-primary-foreground transition-colors hover:bg-primary/90 disabled:pointer-events-none disabled:opacity-40"
+                  >
+                    {isRunning ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <Send className="size-4" />
+                    )}
+                  </button>
                 </div>
               </div>
             </div>

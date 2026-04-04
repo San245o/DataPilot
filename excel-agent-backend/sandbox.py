@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from io import StringIO
 
+import re
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -430,6 +431,7 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
         "np": np,
         "px": px,
         "go": go,
+        "re": re,
         "df": df.copy(),
         "log_output": log_output,
         "print": safe_print,
