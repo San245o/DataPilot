@@ -384,6 +384,49 @@ def _compact_query_output(query_output: str, max_lines: int = 8, max_chars: int 
     return text
 
 
+def _derive_reply_from_query_output(query_output: str) -> str:
+    lines = [line.strip() for line in query_output.splitlines() if line.strip()]
+    if not lines:
+        return ""
+
+    meaningful_lines = [
+        line for line in lines
+        if not line.lower().startswith("showing first")
+        and not line.startswith("[DataFrame:")
+        and not line.startswith("[Series:")
+        and not re.match(r"^\d+\s", line)
+    ]
+    if not meaningful_lines:
+        return ""
+
+    if len(meaningful_lines) == 1:
+        return meaningful_lines[0]
+
+    scalar_lines = [
+        line for line in meaningful_lines
+    ]
+    if scalar_lines:
+        return "\n".join(scalar_lines[:3])
+
+    return "\n".join(meaningful_lines[:3])
+
+
+def _build_table_acknowledgement(query_tables: list[dict[str, Any]]) -> str:
+    if not query_tables:
+        return ""
+
+    first_table = query_tables[0]
+    title = str(first_table.get("title") or "Extracted Table").strip() or "Extracted Table"
+    row_count = len(first_table.get("rows") or [])
+
+    if len(query_tables) == 1:
+        if row_count > 0:
+            return f"Extracted {row_count} rows into {title}."
+        return f"Created {title}."
+
+    return f"Created {len(query_tables)} extracted tables."
+
+
 def _compose_assistant_reply(state: AgentState) -> AgentState:
     """Compose final assistant reply without calling the model again.
 
@@ -393,8 +436,12 @@ def _compose_assistant_reply(state: AgentState) -> AgentState:
     reply = (state.get("assistant_reply") or "Done.").strip()
     query_output = (state.get("query_output") or "").strip()
     action_type = (state.get("action_type") or "query").lower()
+    query_tables = state.get("query_tables") or []
 
     if not query_output:
+        table_ack = _build_table_acknowledgement(query_tables)
+        if table_ack:
+            return {"assistant_reply": table_ack}
         return {"assistant_reply": reply}
 
     safety_notes = _extract_safety_notes(query_output)
@@ -409,7 +456,19 @@ def _compose_assistant_reply(state: AgentState) -> AgentState:
             return {"assistant_reply": safety_notes}
         return {"assistant_reply": reply}
 
-    # For normal query replies that are already informative, keep response concise.
+    table_ack = _build_table_acknowledgement(query_tables)
+    if table_ack:
+        if safety_notes and safety_notes.lower() not in table_ack.lower():
+            return {"assistant_reply": f"{table_ack}\n\n{safety_notes}"}
+        return {"assistant_reply": table_ack}
+
+    derived_reply = _derive_reply_from_query_output(query_output)
+    if derived_reply:
+        if safety_notes and safety_notes.lower() not in derived_reply.lower():
+            return {"assistant_reply": f"{derived_reply}\n\n{safety_notes}"}
+        return {"assistant_reply": derived_reply}
+
+    # Fallback only if we could not derive anything deterministic.
     if not is_generic_reply:
         if safety_notes and safety_notes.lower() not in reply_lower:
             return {"assistant_reply": f"{reply}\n\n{safety_notes}"}
@@ -419,14 +478,9 @@ def _compose_assistant_reply(state: AgentState) -> AgentState:
     if not output_excerpt:
         return {"assistant_reply": reply}
 
-    if output_excerpt.lower() in reply.lower():
-        combined = reply
-    elif reply:
-        combined = f"{reply}\n\n{output_excerpt}"
-    else:
-        combined = output_excerpt
-
-    return {"assistant_reply": combined}
+    if safety_notes and safety_notes.lower() not in output_excerpt.lower():
+        return {"assistant_reply": f"{output_excerpt}\n\n{safety_notes}"}
+    return {"assistant_reply": output_excerpt}
 
 
 def _format_error_reply(state: AgentState) -> AgentState:

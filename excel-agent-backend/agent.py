@@ -13,7 +13,7 @@ SYSTEM_PROMPT_BASE = """You are a data analysis agent using pandas and plotly.
 RESPONSE FORMAT - Return ONLY valid JSON (no markdown):
 {"code": "python code", "assistant_reply": "markdown response", "action_type": "query|mutation|visualization|combined", "table_request": {"enabled": false, "title": ""}}
 
-ENV: df (DataFrame), pd, np, px, go, re, pre-loaded. NO imports. End with result_df=df.
+ENV: df (DataFrame), pd(pandas), np(numpy), px(plotly.express), go(plotly.graph_objects), make_subplots(plotly.subplots.make_subplots), re(regex), pre-loaded. NO imports. End with result_df=df.
 
 HELPERS:
 - log_output(msg) - log text or pass a DataFrame/Series directly (e.g. log_output(df)) to populate the UI table. Do NOT use .to_string() for tables!
@@ -36,9 +36,15 @@ RULES:
 - String match: .str.contains('x',case=False,na=False)
 - Never use direct case-sensitive equality for user-provided text filters (e.g., Item == 'smoothie'). Use text_equals('Item', 'smoothie') or .astype(str).str.strip().str.casefold().eq('smoothie').
 - For money/revenue totals, prefer amount columns like 'Total Spent', 'Total_Spent', 'Amount', 'Revenue' and parse with to_numeric_clean(...).fillna(0) before sum.
+- For COUNT / HOW MANY / TOTAL NUMBER questions, ALWAYS compute the scalar and emit the real executed answer with `log_output(...)` or `print(...)`. Do not leave the count only in Python variables.
+- For scalar query answers (counts, sums, averages, minimums, maximums), keep `assistant_reply` short and generic like 'Done.' so the final reply can be composed from executed output instead of guessing.
 - Charts: assign to fig, never call fig.show/to_html/to_json
+- Prefer `px` for standard single-chart visualizations because it is the default/popular path here and produces simpler, more reliable code.
+- Use `go` and `make_subplots(...)` only when you need custom traces, secondary axes, or multi-panel/subplot layouts.
+- Subplots ARE allowed. For subplot layouts, build the figure with `make_subplots(...)`, add traces with `fig.add_trace(...)`, and keep the final figure in `fig`.
 - Never delete/drop/remove/filter out rows unless the user explicitly asks to delete/drop/remove rows (or duplicates). If not explicitly requested, preserve the original row count.
-- If you mutate data (add/delete/update rows, append multiple rows, sort/reorder rows, or modify columns), set action_type='mutation' unless a chart is also requested, then use action_type='combined'.
+- If you mutate data (add/delete/update rows, append multiple rows, sort/reorder rows, or modify columns), set action_type='mutation' unless any additional output is also requested, then use action_type='combined'.
+- Multi-step tasks are allowed. If the user asks to clean/modify/filter/aggregate and then visualize or summarize, do all requested steps in one code block using the updated `df`, and return the final chart in `fig`.
 - For query/visualization requests, never replace `df` or `result_df` with a filtered subset; use print_query/log_output/highlight_rows and keep `result_df=df`.
 - For structural MUTATIONS (add/drop columns/rows, clean datatypes): Modify `df` directly, return `result_df=df`, and set `table_request.enabled=False`. Do NOT create separate tables for this.
 - For FINDING/SEARCHING (e.g. "find all students"): Use `highlight_rows(df[mask].index.tolist())`. Do NOT use `table_request.enabled=True` unless specifically asked to separate it.
@@ -50,12 +56,17 @@ RULES:
 JSON_OUTPUT_CONTRACT = """STRICT OUTPUT CONTRACT:
 - Return exactly one JSON object only.
 - No markdown, no code fences, no extra commentary.
+- No planning, no reasoning, no self-checks, no bullet points, no prose before or after the JSON.
 - Required keys: code, assistant_reply, action_type, table_request.
 - table_request must include enabled (bool) and title (string).
 """
 
 VIZ_RULES = """
 VIZ RULES - template='plotly_dark', no text on bars/slices, limit 10-15 cats, single series showlegend=False
+
+DEFAULT CHOICE:
+- Use px for normal bar/line/scatter/pie/histogram charts.
+- Use go + make_subplots only for subplot grids, mixed trace types, or highly custom layouts.
 
 BAR (horizontal for long labels):
 data=df.groupby('Cat')['Val'].sum().nlargest(10).reset_index()
@@ -68,6 +79,12 @@ PIE: fig=px.pie(values=counts.values,names=counts.index,template='plotly_dark')
 fig.update_traces(textinfo='percent',hoverinfo='label+value+percent')
 
 SCATTER: fig=px.scatter(df,x='X',y='Y',template='plotly_dark',hover_data=['Name'])
+
+SUBPLOTS:
+fig = make_subplots(rows=1, cols=2, subplot_titles=['Left', 'Right'])
+fig.add_trace(go.Bar(x=left['x'], y=left['y'], name='Left'), row=1, col=1)
+fig.add_trace(go.Scatter(x=right['x'], y=right['y'], mode='lines', name='Right'), row=1, col=2)
+fig.update_layout(template='plotly_dark', showlegend=False)
 
 HEATMAP MATRIX RULE:
 - If data already has a metric/count column (e.g., accident_count, total, amount, revenue), aggregate with sum on that column.
@@ -192,12 +209,21 @@ def _extract_first_object(text: str) -> str:
     return text[start:]
 
 
+def _extract_last_likely_json_object(text: str) -> str | None:
+    candidates: list[str] = []
+    for match in re.finditer(r"\{", text):
+        candidate = _extract_first_object(text[match.start():]).strip()
+        if candidate.startswith("{") and '"code"' in candidate and '"assistant_reply"' in candidate:
+            candidates.append(candidate)
+    return candidates[-1] if candidates else None
+
+
 def _extract_json(raw: str) -> dict[str, Any]:
     text = raw.strip()
     m = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
     if m:
         text = m.group(1).strip()
-    text = _extract_first_object(text)
+    text = _extract_last_likely_json_object(text) or _extract_first_object(text)
 
     # First attempt: strict JSON.
     try:
@@ -336,8 +362,13 @@ def _invoke_model(*, model_name: str, system_prompt: str, user_message: str) -> 
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(model_name or "gemini-3.1-flash-lite-preview")
     generation_config: dict[str, Any] = {"temperature": 0}
-    # Enable JSON mode for Gemini models.
-    if (model_name or "").startswith("gemini") or (model_name or "").startswith("models/gemini"):
+    # Enable JSON mode for Gemini-hosted Gemini and Gemma models.
+    if (
+        (model_name or "").startswith("gemini")
+        or (model_name or "").startswith("models/gemini")
+        or (model_name or "").startswith("gemma")
+        or (model_name or "").startswith("models/gemma")
+    ):
         generation_config["response_mime_type"] = "application/json"
 
     try:

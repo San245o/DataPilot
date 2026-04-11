@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 
 def _reshape_flat_values(values: list[Any], shape: Any) -> Any:
@@ -431,6 +432,7 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
         "np": np,
         "px": px,
         "go": go,
+        "make_subplots": make_subplots,
         "re": re,
         "df": df.copy(),
         "log_output": log_output,

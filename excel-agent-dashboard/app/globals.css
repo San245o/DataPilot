@@ -282,3 +282,83 @@ html, body {
 .animate-swipe {
   animation: swipe 1.5s ease-in-out forwards;
 }
+
+:root {
+  --menu-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --menu-duration: 220ms;
+}
+
+.menu-surface {
+  border: 1px solid color-mix(in oklab, var(--border) 78%, transparent);
+  background:
+    linear-gradient(180deg, color-mix(in oklab, var(--card) 94%, white 6%), color-mix(in oklab, var(--card) 98%, transparent)),
+    var(--card);
+  box-shadow:
+    0 20px 40px -24px rgb(0 0 0 / 0.45),
+    0 10px 24px -18px rgb(0 0 0 / 0.35),
+    inset 0 1px 0 rgb(255 255 255 / 0.05);
+  backdrop-filter: blur(14px);
+}
+
+.dark .menu-surface {
+  background:
+    linear-gradient(180deg, rgb(23 28 35 / 0.96), rgb(17 21 27 / 0.96)),
+    var(--card);
+  box-shadow:
+    0 24px 48px -28px rgb(0 0 0 / 0.72),
+    0 14px 26px -20px rgb(0 0 0 / 0.58),
+    inset 0 1px 0 rgb(255 255 255 / 0.04);
+}
+
+.menu-popover {
+  opacity: 0;
+  transform: translateY(-6px) scale(0.965);
+  transform-origin: top center;
+  pointer-events: none;
+  transition:
+    opacity var(--menu-duration) var(--menu-ease),
+    transform var(--menu-duration) var(--menu-ease),
+    visibility 0s linear var(--menu-duration);
+  visibility: hidden;
+}
+
+.menu-popover[data-state="open"] {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  pointer-events: auto;
+  visibility: visible;
+  transition:
+    opacity var(--menu-duration) var(--menu-ease),
+    transform var(--menu-duration) var(--menu-ease),
+    visibility 0s linear 0s;
+}
+
+.menu-popover[data-side="top"] {
+  transform-origin: bottom center;
+}
+
+.menu-popover[data-side="top"][data-state="closed"] {
+  transform: translateY(6px) scale(0.965);
+}
+
+.thinking-flow {
+  color: transparent;
+  background-image: linear-gradient(
+    90deg,
+    color-mix(in oklab, var(--muted-foreground) 55%, transparent) 0%,
+    color-mix(in oklab, var(--muted-foreground) 85%, transparent) 28%,
+    color-mix(in oklab, var(--primary) 92%, white 8%) 50%,
+    color-mix(in oklab, var(--muted-foreground) 85%, transparent) 72%,
+    color-mix(in oklab, var(--muted-foreground) 55%, transparent) 100%
+  );
+  background-size: 220% 100%;
+  background-position: 120% 0;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: thinking-flow 1.2s linear infinite;
+}
+
+@keyframes thinking-flow {
+  from { background-position: 120% 0; }
+  to { background-position: -120% 0; }
+}

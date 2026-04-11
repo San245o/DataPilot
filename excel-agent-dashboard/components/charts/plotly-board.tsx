@@ -16,9 +16,13 @@ type PlotlyBoardProps = {
 }
 
 export function PlotlyBoard({ data, layout, isDark = true }: PlotlyBoardProps) {
-  const fontColor = isDark ? "#94a3b8" : "#334155"
-  const gridColor = isDark ? "rgba(148,163,184,0.06)" : "rgba(0,0,0,0.035)"
+  const fontColor = isDark ? "#aab8cb" : "#334155"
+  const titleColor = isDark ? "#e6edf5" : "#1f2d3d"
+  const gridColor = isDark ? "rgba(148,163,184,0.08)" : "rgba(0,0,0,0.05)"
   const bgColor = "rgba(0,0,0,0)"
+  const colorway = isDark
+    ? ["#11c5a5", "#5f83ff", "#ff8a5b", "#8cdb72", "#c18cff", "#ffd166"]
+    : ["#0f9f86", "#4763ff", "#f26b43", "#5fa83b", "#9757e8", "#d7a21f"]
   const sceneLayout = (layout?.scene ?? {}) as Partial<Layout["scene"]>
 
   const mergedLayout: Partial<Layout> = {
@@ -26,19 +30,42 @@ export function PlotlyBoard({ data, layout, isDark = true }: PlotlyBoardProps) {
     autosize: true,
     paper_bgcolor: bgColor,
     plot_bgcolor: bgColor,
-    margin: { l: 36, r: 14, t: 24, b: 34 },
+    colorway,
+    margin: { l: 42, r: 18, t: 52, b: 44 },
     font: { size: 12, color: fontColor, family: "Manrope, system-ui, sans-serif" },
+    title: layout?.title
+      ? {
+          ...(typeof layout.title === "object" ? layout.title : { text: String(layout.title) }),
+          x: 0.03,
+          xanchor: "left",
+          font: { color: titleColor, size: 22, family: "Manrope, system-ui, sans-serif" },
+        }
+      : undefined,
     xaxis: {
       ...(layout?.xaxis ?? {}),
       gridcolor: gridColor,
       zerolinecolor: gridColor,
       automargin: true,
+      tickfont: { color: fontColor, size: 12 },
+      title: layout?.xaxis?.title
+        ? {
+            ...(typeof layout.xaxis.title === "object" ? layout.xaxis.title : { text: String(layout.xaxis.title) }),
+            font: { color: fontColor, size: 13, family: "Manrope, system-ui, sans-serif" },
+          }
+        : undefined,
     },
     yaxis: {
       ...(layout?.yaxis ?? {}),
       gridcolor: gridColor,
       zerolinecolor: gridColor,
       automargin: true,
+      tickfont: { color: fontColor, size: 12 },
+      title: layout?.yaxis?.title
+        ? {
+            ...(typeof layout.yaxis.title === "object" ? layout.yaxis.title : { text: String(layout.yaxis.title) }),
+            font: { color: fontColor, size: 13, family: "Manrope, system-ui, sans-serif" },
+          }
+        : undefined,
     },
     scene: {
       ...sceneLayout,
@@ -61,7 +88,8 @@ export function PlotlyBoard({ data, layout, isDark = true }: PlotlyBoardProps) {
     legend: {
       ...(layout?.legend ?? {}),
       bgcolor: bgColor,
-      font: { color: fontColor, size: 11 },
+      borderwidth: 0,
+      font: { color: fontColor, size: 12, family: "Manrope, system-ui, sans-serif" },
     },
     hoverlabel: {
       ...(layout?.hoverlabel ?? {}),
