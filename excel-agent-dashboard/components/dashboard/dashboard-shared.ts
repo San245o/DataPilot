@@ -15,6 +15,19 @@ export type QueryTablePayload = {
   rows: SheetRow[]
 }
 
+export type HighlightedColumn = {
+  column: string
+}
+
+export type ThinkingTraceEntry = {
+  kind: "thought" | "action" | "observation"
+  content: string
+  tool_name?: string
+  tool_input?: string
+  details?: string
+  status?: "completed" | "error"
+}
+
 export type TokenUsageSummary = {
   prompt_tokens: number
   completion_tokens: number
@@ -30,6 +43,8 @@ export type AgentExecuteResponse = {
   assistant_reply?: string
   mutation?: boolean
   highlight_indices?: number[]
+  highlighted_columns?: HighlightedColumn[]
+  thinking_trace?: ThinkingTraceEntry[]
   token_usage?: TokenUsageSummary
   detail?: string
 }
@@ -40,6 +55,9 @@ export type ChatMessage = {
   code?: string
   query_output?: string | null
   table_links?: Array<{ id: string; title: string }>
+  thinkingTrace?: ThinkingTraceEntry[]
+  modelLabel?: string
+  isStreaming?: boolean
 }
 
 export type VizWidget = {
@@ -112,10 +130,18 @@ export const MODEL_OPTIONS = [
   { value: "meta/llama-3.1-405b-instruct", label: "Llama 3.1 405B (NVIDIA)" },
 ] as const
 
+export const DEFAULT_THINKING_MODEL = "models/gemma-4-31b-it" as const
+
+export const THINKING_MODEL_OPTIONS = MODEL_OPTIONS.filter(
+  (option) =>
+    option.value === DEFAULT_THINKING_MODEL ||
+    option.value === "minimaxai/minimax-m2.5"
+)
+
 export const SLASH_COMMANDS: SlashCommandOption[] = [
   { command: "/visualize", description: "Build a chart (bar, line, scatter, pie, heatmap).", rewritePrefix: "Create a visualization." },
   { command: "/modify", description: "Update rows/columns in the main dataset.", rewritePrefix: "Modify the dataset." },
-  { command: "/extract", description: "Create a separate result table from selected rows/columns.", rewritePrefix: "Extract a separate result table." },
+  { command: "/extract", description: "Create a separate result table from selected rows/columns.", rewritePrefix: "[FORCE_EXTRACT_TABLE] Create a separate extracted table. Use a new result table instead of answering only in chat." },
   { command: "/filter", description: "Find matching rows without mutating source data.", rewritePrefix: "Filter the dataset to find matching rows." },
   { command: "/summarize", description: "Get concise KPIs, totals, and summary stats.", rewritePrefix: "Summarize the key metrics concisely." },
   { command: "/pivot", description: "Create a pivot/matrix view from categorical dimensions.", rewritePrefix: "Create a pivot-style matrix." },

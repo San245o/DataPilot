@@ -3,7 +3,9 @@ from __future__ import annotations
 import ast
 import builtins
 import json
+import math
 import threading
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 from io import StringIO
@@ -14,6 +16,61 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+
+
+def _repair_mojibake(value: str) -> str:
+    try:
+        repaired = value.encode("latin-1").decode("utf-8")
+        return repaired
+    except Exception:
+        return value
+
+
+def _normalize_text_value(value: Any) -> str:
+    text = str(value).strip()
+    candidates = [text]
+
+    repaired = _repair_mojibake(text)
+    if repaired != text:
+        candidates.append(repaired)
+
+    normalized: list[str] = []
+    for candidate in candidates:
+        candidate = unicodedata.normalize("NFKC", candidate)
+        candidate = unicodedata.normalize("NFKD", candidate)
+        candidate = "".join(ch for ch in candidate if not unicodedata.combining(ch))
+        normalized.append(candidate.casefold())
+
+    return normalized[-1]
+
+
+def _compute_changed_row_indices(original_df: pd.DataFrame, result_df: pd.DataFrame) -> list[int]:
+    changed: list[int] = []
+
+    shared_columns = [column for column in original_df.columns if column in result_df.columns]
+    shared_len = min(len(original_df.index), len(result_df.index))
+
+    for row_index in range(shared_len):
+        original_row = original_df.iloc[row_index]
+        result_row = result_df.iloc[row_index]
+        row_changed = False
+
+        for column in shared_columns:
+            original_value = original_row[column]
+            result_value = result_row[column]
+            if pd.isna(original_value) and pd.isna(result_value):
+                continue
+            if original_value != result_value:
+                row_changed = True
+                break
+
+        if row_changed:
+            changed.append(row_index)
+
+    if len(result_df.index) > len(original_df.index):
+        changed.extend(range(len(original_df.index), len(result_df.index)))
+
+    return changed
 
 
 def _reshape_flat_values(values: list[Any], shape: Any) -> Any:
@@ -143,6 +200,7 @@ class SandboxResult:
     query_table_rows: list[dict[str, Any]] | None
     mutation: bool = False
     highlight_indices: list[int] = field(default_factory=list)
+    highlighted_columns: list[str] = field(default_factory=list)
 
 
 def _validate_code(code: str) -> None:
@@ -182,6 +240,7 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
     query_table_rows: list[dict[str, Any]] | None = None
     mutation_flag: list[bool] = [False]
     highlight_idx: list[int] = []
+    highlighted_columns: list[str] = []
 
     env: dict[str, Any] = {}
 
@@ -209,15 +268,15 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
         current_df = _get_df()
         if column not in current_df.columns:
             raise SandboxViolation(f"Column '{column}' does not exist")
-        needle = str(value).strip().casefold()
-        return current_df[column].astype(str).str.strip().str.casefold().eq(needle)
+        needle = _normalize_text_value(value)
+        return current_df[column].map(_normalize_text_value).eq(needle)
 
     def text_contains(column: str, value: str) -> pd.Series:
         current_df = _get_df()
         if column not in current_df.columns:
             raise SandboxViolation(f"Column '{column}' does not exist")
-        needle = str(value).strip()
-        return current_df[column].astype(str).str.contains(needle, case=False, na=False)
+        needle = _normalize_text_value(value)
+        return current_df[column].map(_normalize_text_value).str.contains(re.escape(needle), na=False)
 
     def to_numeric_clean(values: str | pd.Series) -> pd.Series:
         current_df = _get_df()
@@ -295,6 +354,17 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
         # Always output all indices, never truncate highlighting
         highlight_idx.extend(indices)
 
+    def highlight_column(column: str) -> None:
+        current_df = _get_df()
+        if column not in current_df.columns:
+            raise SandboxViolation(f"Column '{column}' does not exist")
+        if column not in highlighted_columns:
+            highlighted_columns.append(column)
+
+    def highlight_columns(columns: list[str]) -> None:
+        for column in columns:
+            highlight_column(column)
+
     def print_query(query_expr: str, max_rows: int = 10) -> pd.DataFrame:
         nonlocal query_table_rows
         current_df = _get_df()
@@ -360,9 +430,9 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
         if row_index < 0 or row_index >= len(current_df.index):
             raise SandboxViolation("Row index out of range")
         current_df.at[row_index, column] = value
-        # Auto-highlight the edited row so the UI shows what changed
         if row_index not in highlight_idx:
             highlight_idx.append(row_index)
+        highlight_column(column)
         return _set_df(current_df)
 
     def rename_column(old_name: str, new_name: str) -> pd.DataFrame:
@@ -384,8 +454,14 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
         "abs": builtins.abs,
         "all": builtins.all,
         "any": builtins.any,
+        "ascii": builtins.ascii,
+        "bin": builtins.bin,
         "bool": builtins.bool,
+        "callable": builtins.callable,
+        "chr": builtins.chr,
+        "complex": builtins.complex,
         "dict": builtins.dict,
+        "divmod": builtins.divmod,
         "enumerate": builtins.enumerate,
         "filter": builtins.filter,
         "float": builtins.float,
@@ -393,6 +469,7 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
         "frozenset": builtins.frozenset,
         "hasattr": builtins.hasattr,
         "hash": builtins.hash,
+        "hex": builtins.hex,
         "int": builtins.int,
         "isinstance": builtins.isinstance,
         "issubclass": builtins.issubclass,
@@ -403,6 +480,9 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
         "max": builtins.max,
         "min": builtins.min,
         "next": builtins.next,
+        "oct": builtins.oct,
+        "ord": builtins.ord,
+        "pow": builtins.pow,
         "print": safe_print,
         "range": builtins.range,
         "repr": builtins.repr,
@@ -430,10 +510,12 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
         "__builtins__": safe_builtins,
         "pd": pd,
         "np": np,
+        "math": math,
         "px": px,
         "go": go,
         "make_subplots": make_subplots,
         "re": re,
+        "unicodedata": unicodedata,
         "df": df.copy(),
         "log_output": log_output,
         "print": safe_print,
@@ -447,6 +529,8 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
         "rename_column": rename_column,
         "table_to_csv": table_to_csv,
         "highlight_rows": highlight_rows,
+        "highlight_column": highlight_column,
+        "highlight_columns": highlight_columns,
         "text_equals": text_equals,
         "text_contains": text_contains,
         "to_numeric_clean": to_numeric_clean,
@@ -483,6 +567,23 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
 
     query_output = "\n\n".join([item for item in query_logs if item]).strip() or None
 
+    if mutation_flag[0] and not highlight_idx:
+        highlight_idx.extend(_compute_changed_row_indices(original_df, result_df))
+
+    if mutation_flag[0] and not highlighted_columns:
+        for row_index in highlight_idx:
+            if 0 <= row_index < len(original_df.index) and 0 <= row_index < len(result_df.index):
+                shared_columns = [column for column in original_df.columns if column in result_df.columns]
+                for column in shared_columns:
+                    original_value = original_df.iloc[row_index][column]
+                    result_value = result_df.iloc[row_index][column]
+                    if pd.isna(original_value) and pd.isna(result_value):
+                        continue
+                    if original_value != result_value:
+                        if column not in highlighted_columns:
+                            highlighted_columns.append(column)
+                        break
+
     return {
         "ok": True,
         "rows": _df_to_records(result_df),
@@ -491,6 +592,7 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
         "query_table_rows": query_table_rows,
         "mutation": mutation_flag[0],
         "highlight_indices": highlight_idx,
+        "highlighted_columns": highlighted_columns,
     }
 
 
@@ -529,4 +631,5 @@ def run_sandboxed(code: str, rows: list[dict[str, Any]], timeout_seconds: int = 
         query_table_rows=result_container.get("query_table_rows"),
         mutation=result_container.get("mutation", False),
         highlight_indices=result_container.get("highlight_indices", []),
+        highlighted_columns=result_container.get("highlighted_columns", []),
     )

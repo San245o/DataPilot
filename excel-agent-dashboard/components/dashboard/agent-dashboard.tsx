@@ -16,14 +16,17 @@ import {
 
 import {
   clamp,
+  DEFAULT_THINKING_MODEL,
   getNextWidgetZIndex,
   INITIAL_CHAT_MESSAGES,
   MODEL_OPTIONS,
   normalizeRows,
   seedRows,
+  THINKING_MODEL_OPTIONS,
   transformationSteps,
   type ChatMessage,
   type FullscreenPanel,
+  type HighlightedColumn,
   type PivotTableTab,
   type SheetRow,
   type VisualizationPayload,
@@ -43,6 +46,7 @@ export function AgentDashboard() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [isDark, setIsDark] = useState(true)
   const [highlightedRows, setHighlightedRows] = useState<Set<number>>(new Set())
+  const [highlightedColumns, setHighlightedColumns] = useState<HighlightedColumn[]>([])
   const [fullscreenPanel, setFullscreenPanel] = useState<FullscreenPanel>(null)
   const [splitRatio, setSplitRatio] = useState(0.38)
   const [isSplitterDragging, setIsSplitterDragging] = useState(false)
@@ -55,6 +59,7 @@ export function AgentDashboard() {
   const [queryCount, setQueryCount] = useState(0)
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(INITIAL_CHAT_MESSAGES)
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
+  const [thinkingMode, setThinkingMode] = useState(false)
 
   const splitContainerRef = useRef<HTMLDivElement | null>(null)
   const mainContentRef = useRef<HTMLDivElement | null>(null)
@@ -62,6 +67,15 @@ export function AgentDashboard() {
   const modelMenuRef = useRef<HTMLDivElement | null>(null)
 
   const { clearError, error, isRunning, runAgent, setError } = useAgentRunner()
+
+  const availableModels = useMemo(
+    () => (thinkingMode ? THINKING_MODEL_OPTIONS : MODEL_OPTIONS),
+    [thinkingMode]
+  )
+  const selectedModelLabel = useMemo(
+    () => availableModels.find((option) => option.value === modelName)?.label ?? modelName,
+    [availableModels, modelName]
+  )
 
   const baseShapeLabel = useMemo(() => {
     const baseColumnCount = Object.keys(rows[0] ?? {}).length
@@ -138,6 +152,17 @@ export function AgentDashboard() {
     setIsDark((prev) => !prev)
   }, [])
 
+  const toggleThinkingMode = useCallback(() => {
+    setThinkingMode((prev) => {
+      const next = !prev
+      if (next) {
+        setModelName(DEFAULT_THINKING_MODEL)
+      }
+      return next
+    })
+    setModelMenuOpen(false)
+  }, [])
+
   const handleFileUpload = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     if (!file) return
@@ -169,6 +194,7 @@ export function AgentDashboard() {
     setPivotTables([])
     setActiveDataTab("base")
     setHighlightedRows(new Set())
+    setHighlightedColumns([])
     clearError()
   }
 
@@ -225,26 +251,79 @@ export function AgentDashboard() {
     clearError()
 
     const outgoingPrompt = prompt.trim()
-    const nextMessages: ChatMessage[] = [
+    const isHelpCommand = outgoingPrompt.toLowerCase() === "/help"
+    const historyWithUser: ChatMessage[] = [
       ...chatMessages,
       { role: "user", content: outgoingPrompt },
     ]
+    const streamingPlaceholder: ChatMessage | null = thinkingMode
+      ? {
+          role: "assistant",
+          content: "",
+          thinkingTrace: [],
+          modelLabel: selectedModelLabel,
+          isStreaming: true,
+        }
+      : null
 
-    setChatMessages(nextMessages)
+    setChatMessages(streamingPlaceholder ? [...historyWithUser, streamingPlaceholder] : historyWithUser)
     setPrompt("")
+
+    if (isHelpCommand) {
+      setChatMessages((prev) => [
+        ...(thinkingMode ? prev.slice(0, -1) : prev),
+        {
+          role: "assistant",
+          content:
+            "Try prompts like: `/filter movies after 2010`, `/modify rename Electronic to Electronics`, `/extract titles directed by Christopher Nolan`, `/visualize total revenue by category`, `/summarize this dataset`, or ask in plain English for edits, filters, summaries, and charts.",
+        },
+      ])
+      return
+    }
 
     const result = await runAgent({
       prompt: outgoingPrompt,
       rows,
       modelName,
-      history: nextMessages,
+      history: historyWithUser,
+      thinkingMode,
+      onThinkingTrace: (entry) => {
+        setChatMessages((prev) => {
+          if (!thinkingMode || prev.length === 0) return prev
+          const next = [...prev]
+          const lastMessage = next[next.length - 1]
+          if (lastMessage?.role !== "assistant" || !lastMessage.isStreaming) return prev
+          next[next.length - 1] = {
+            ...lastMessage,
+            thinkingTrace: [...(lastMessage.thinkingTrace ?? []), entry],
+          }
+          return next
+        })
+      },
     })
 
     if (!result.ok) {
-      setChatMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: `Error: ${result.error}` },
-      ])
+      if (thinkingMode) {
+        setChatMessages((prev) => {
+          if (prev.length === 0) return prev
+          const next = [...prev]
+          const lastMessage = next[next.length - 1]
+          if (lastMessage?.role === "assistant" && lastMessage.isStreaming) {
+            next[next.length - 1] = {
+              ...lastMessage,
+              content: `Error: ${result.error}`,
+              isStreaming: false,
+            }
+            return next
+          }
+          return [...prev, { role: "assistant", content: `Error: ${result.error}` }]
+        })
+      } else {
+        setChatMessages((prev) => [
+          ...prev,
+          { role: "assistant", content: `Error: ${result.error}` },
+        ])
+      }
       return
     }
 
@@ -288,9 +367,34 @@ export function AgentDashboard() {
     }
 
     setHighlightedRows(new Set(data.highlightIndices))
+    setHighlightedColumns(data.highlightedColumns)
     addVisualizationWidget(data.visualizationPayload)
-    setChatMessages((prev) => [...prev, data.assistantMessage])
-  }, [addVisualizationWidget, chatMessages, clearError, isRunning, modelName, prompt, rows, runAgent])
+    if (thinkingMode) {
+      setChatMessages((prev) => {
+        if (prev.length === 0) return prev
+        const next = [...prev]
+        const lastMessage = next[next.length - 1]
+        const finalAssistant = {
+          ...data.assistantMessage,
+          modelLabel: selectedModelLabel,
+          isStreaming: false,
+        }
+        if (lastMessage?.role === "assistant" && lastMessage.isStreaming) {
+          next[next.length - 1] = finalAssistant
+          return next
+        }
+        return [...prev, finalAssistant]
+      })
+    } else {
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          ...data.assistantMessage,
+          modelLabel: selectedModelLabel,
+        },
+      ])
+    }
+  }, [addVisualizationWidget, chatMessages, clearError, isRunning, modelName, prompt, rows, runAgent, selectedModelLabel, thinkingMode])
 
   return (
     <div className="flex h-dvh flex-col overflow-hidden bg-background text-foreground font-sans antialiased">
@@ -463,7 +567,7 @@ export function AgentDashboard() {
                   onClick={() => setModelMenuOpen((prev) => !prev)}
                   className="flex h-9 w-full items-center justify-between rounded-lg border border-border/80 bg-secondary/85 px-3 text-xs font-medium text-foreground outline-none transition-[border-color,background-color,box-shadow,transform] duration-200 ease-[var(--menu-ease)] hover:border-primary/35 hover:bg-accent/70 focus-visible:ring-2 focus-visible:ring-ring/60"
                 >
-                  <span className="truncate">{MODEL_OPTIONS.find((option) => option.value === modelName)?.label ?? modelName}</span>
+                  <span className="truncate">{selectedModelLabel}</span>
                   <ChevronDown className={`size-3.5 shrink-0 text-muted-foreground transition-transform duration-200 ease-[var(--menu-ease)] ${modelMenuOpen ? "rotate-180 text-foreground" : ""}`} />
                 </button>
 
@@ -472,7 +576,7 @@ export function AgentDashboard() {
                   className="menu-surface menu-popover absolute bottom-full left-0 right-0 mb-2 overflow-hidden rounded-xl p-1.5 z-50"
                   data-side="top"
                 >
-                  {MODEL_OPTIONS.map((option) => {
+                  {availableModels.map((option) => {
                     const isActive = option.value === modelName
                     return (
                       <button
@@ -509,6 +613,7 @@ export function AgentDashboard() {
                 pivotTables={pivotTables}
                 activeDataTab={activeDataTab}
                 highlightedRows={highlightedRows}
+                highlightedColumns={highlightedColumns}
                 fullscreen={fullscreenPanel === "data"}
                 onActivateBaseData={activateBaseData}
                 onOpenPivotTable={openPivotTable}
@@ -545,8 +650,11 @@ export function AgentDashboard() {
             prompt={prompt}
             isRunning={isRunning}
             error={error}
+            thinkingMode={thinkingMode}
+            modelLabel={selectedModelLabel}
             onPromptChange={(value) => setPrompt(value)}
             onSubmit={handleRunAgent}
+            onToggleThinkingMode={toggleThinkingMode}
             onClearError={clearError}
             onOpenTableLink={openPivotTable}
           />

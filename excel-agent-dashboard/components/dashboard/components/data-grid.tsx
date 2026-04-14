@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import { ChevronDown, ChevronLeft, ChevronRight, Maximize2, Minimize2, X } from "lucide-react"
 
-import { OVERSCAN, ROW_HEIGHT, type PivotTableTab, type SheetRow } from "@/components/dashboard/dashboard-shared"
+import { OVERSCAN, ROW_HEIGHT, type HighlightedColumn, type PivotTableTab, type SheetRow } from "@/components/dashboard/dashboard-shared"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 
 type DataGridProps = {
@@ -11,6 +11,7 @@ type DataGridProps = {
   pivotTables: PivotTableTab[]
   activeDataTab: string
   highlightedRows: Set<number>
+  highlightedColumns: HighlightedColumn[]
   fullscreen: boolean
   onActivateBaseData: () => void
   onOpenPivotTable: (pivotId: string) => void
@@ -23,6 +24,7 @@ export function DataGrid({
   pivotTables,
   activeDataTab,
   highlightedRows,
+  highlightedColumns,
   fullscreen,
   onActivateBaseData,
   onOpenPivotTable,
@@ -53,6 +55,14 @@ export function DataGrid({
     if (!isBaseDataTab) return []
     return Array.from(highlightedRows).sort((a, b) => a - b)
   }, [highlightedRows, isBaseDataTab])
+  const highlightedColumnSet = useMemo(() => {
+    const set = new Set<string>()
+    if (!isBaseDataTab) return set
+    highlightedColumns.forEach((column) => {
+      set.add(column.column)
+    })
+    return set
+  }, [highlightedColumns, isBaseDataTab])
   const totalTableWidth = useMemo(
     () => Math.max(headers.reduce((sum, header) => sum + (colWidths[header] || 150), 0), 100),
     [colWidths, headers]
@@ -300,7 +310,9 @@ export function DataGrid({
                     style={{ width: colWidths[header] || 150 }}
                     className="relative sticky top-0 z-10 h-8 bg-card/95 backdrop-blur px-3 text-[11px] font-semibold text-muted-foreground truncate group"
                   >
-                    {header}
+                    <div className={highlightedColumnSet.has(header) ? "column-highlight" : ""}>
+                      <span className="relative z-10 block truncate">{header}</span>
+                    </div>
                     <div
                       className="absolute top-0 right-0 w-1.5 h-full cursor-col-resize opacity-0 group-hover:opacity-100 hover:opacity-100 hover:bg-primary/50 transition-opacity"
                       onMouseDown={(event) => {

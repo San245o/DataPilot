@@ -2,24 +2,29 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 import os
 import re
 from typing import Any
 
 import google.generativeai as genai
 
+logger = logging.getLogger("excel-agent-backend.model")
+
 SYSTEM_PROMPT_BASE = """You are a data analysis agent using pandas and plotly.
 
 RESPONSE FORMAT - Return ONLY valid JSON (no markdown):
 {"code": "python code", "assistant_reply": "markdown response", "action_type": "query|mutation|visualization|combined", "table_request": {"enabled": false, "title": ""}}
 
-ENV: df (DataFrame), pd(pandas), np(numpy), px(plotly.express), go(plotly.graph_objects), make_subplots(plotly.subplots.make_subplots), re(regex), pre-loaded. NO imports. End with result_df=df.
+ENV: df (DataFrame), pd(pandas), np(numpy), math, px(plotly.express), go(plotly.graph_objects), make_subplots(plotly.subplots.make_subplots), re(regex), unicodedata, pre-loaded. NO imports. End with result_df=df.
 
 HELPERS:
 - log_output(msg) - log text or pass a DataFrame/Series directly (e.g. log_output(df)) to populate the UI table. Do NOT use .to_string() for tables!
 - print_query('filter_expr') - filter df with query string like 'Price>100'
 - print_table(max_rows=10) - show df snapshot
 - highlight_rows(indices) - pass a list of ALL matching indices (do not truncate or slice the list)
+- highlight_column(column) - highlight one important column header in the UI
+- highlight_columns(columns) - highlight multiple relevant column headers in the UI while rows stay highlighted
 - text_equals(column, value) - case-insensitive exact match with stripped whitespace
 - text_contains(column, value) - case-insensitive contains match
 - to_numeric_clean(column_or_series) - strips currency/non-numeric chars then converts with pd.to_numeric(errors='coerce')
@@ -38,6 +43,7 @@ RULES:
 - For money/revenue totals, prefer amount columns like 'Total Spent', 'Total_Spent', 'Amount', 'Revenue' and parse with to_numeric_clean(...).fillna(0) before sum.
 - For COUNT / HOW MANY / TOTAL NUMBER questions, ALWAYS compute the scalar and emit the real executed answer with `log_output(...)` or `print(...)`. Do not leave the count only in Python variables.
 - For scalar query answers (counts, sums, averages, minimums, maximums), keep `assistant_reply` short and generic like 'Done.' so the final reply can be composed from executed output instead of guessing.
+- For non-ASCII / mojibake / encoding checks, prefer string methods like `.isascii()` when possible; `ord(...)`, `unicodedata`, and `math` are available if needed for simple compatibility logic.
 - Charts: assign to fig, never call fig.show/to_html/to_json
 - Prefer `px` for standard single-chart visualizations because it is the default/popular path here and produces simpler, more reliable code.
 - Use `go` and `make_subplots(...)` only when you need custom traces, secondary axes, or multi-panel/subplot layouts.
@@ -47,9 +53,13 @@ RULES:
 - Multi-step tasks are allowed. If the user asks to clean/modify/filter/aggregate and then visualize or summarize, do all requested steps in one code block using the updated `df`, and return the final chart in `fig`.
 - For query/visualization requests, never replace `df` or `result_df` with a filtered subset; use print_query/log_output/highlight_rows and keep `result_df=df`.
 - For structural MUTATIONS (add/drop columns/rows, clean datatypes): Modify `df` directly, return `result_df=df`, and set `table_request.enabled=False`. Do NOT create separate tables for this.
-- For FINDING/SEARCHING (e.g. "find all students"): Use `highlight_rows(df[mask].index.tolist())`. Do NOT use `table_request.enabled=True` unless specifically asked to separate it.
-- For LISTING/PRINTING (e.g. "list the top 5 students"): If the result has < 10 rows, format the output as a bulleted markdown list in `assistant_reply` (do NOT use tables or df.to_markdown()). If the result has >= 10 rows, do NOT include the text in chat; instead, use `highlight_rows()` to show the result in the main table. Always set `table_request.enabled=False`.
-- For EXTRACTIONS/PIVOTS (e.g. "pivot table", "extract to new table"): Create a subset df, pass it via `log_output(subset_df)`, and set `table_request.enabled=True`.
+- Cleaning, standardizing, coercing numeric columns, removing strings from numeric fields, and making values positive are mutation tasks. Persist the cleaned `df` instead of only logging summary statistics.
+- For FINDING/SEARCHING/FILTERING: use `highlight_rows(df[mask].index.tolist())` and also highlight the most relevant worked-with columns using `highlight_column(...)` or `highlight_columns([...])`.
+- If the user asks to identify, point out, mark, fix, update, rename, or correct values in a specific column, highlight that column header with `highlight_column(column)`.
+- If multiple columns are central to the request, prefer `highlight_columns(['col1', 'col2'])` so those headers glow while the matched rows remain highlighted.
+- For LISTING/PRINTING (e.g. "list the top 5 students"): If the result has < 10 rows, put the actual answer in `assistant_reply` as a short markdown list. Do NOT create a separate table unless explicitly requested.
+- Only use `table_request.enabled=True` when the user explicitly asks for a separate/new/extracted/pivot table. For normal queries, answer in chat and keep `table_request.enabled=False`.
+- If the request includes `[FORCE_EXTRACT_TABLE]`, you MUST create a separate subset table with `log_output(subset_df)`, set `table_request.enabled=True`, keep `result_df=df`, and avoid answering with only chat text.
 - table_request.title MUST be very short (max 3-5 words), e.g., "Low Involvement".
 """
 
@@ -60,6 +70,31 @@ JSON_OUTPUT_CONTRACT = """STRICT OUTPUT CONTRACT:
 - Required keys: code, assistant_reply, action_type, table_request.
 - table_request must include enabled (bool) and title (string).
 """
+
+THINKING_TRACE_PROMPT = """THINKING MODE - visible ReAct trace:
+- Add a concise, user-visible reasoning_steps array that summarizes what you will do.
+- reasoning_steps must NOT reveal private chain-of-thought. Keep them short, practical, and execution-focused.
+- Include 2 to 4 steps only.
+- Each step must be an object with keys: kind, title, content.
+- kind must be either "thought" or "action".
+- Titles should be short (2-4 words). Content should be one short sentence.
+- Do not invent execution results in reasoning_steps. Real observations are added later by the system.
+"""
+
+THINKING_JSON_OUTPUT_CONTRACT = """STRICT OUTPUT CONTRACT:
+- Return exactly one JSON object only.
+- No markdown, no code fences, no extra commentary.
+- Required keys: reasoning_steps, code, assistant_reply, action_type, table_request.
+- reasoning_steps must be an array with 2 to 4 objects.
+- Each reasoning_steps item must include kind, title, and content.
+- kind must be "thought" or "action".
+- table_request must include enabled (bool) and title (string).
+"""
+
+THINKING_SUPPORTED_MODELS = {
+    "models/gemma-4-31b-it",
+    "minimaxai/minimax-m2.5",
+}
 
 VIZ_RULES = """
 VIZ RULES - template='plotly_dark', no text on bars/slices, limit 10-15 cats, single series showlegend=False
@@ -123,16 +158,26 @@ _MUTATION_KW = {
     'change', 'update', 'replace', 'rename', 'delete', 'add', 'edit', 'merge', 'set', 'modify', 'remove', 'fix', 'correct', 'convert',
     'append', 'insert', 'sort', 'reorder', 'order by', 'arrange',
     'add row', 'add rows', 'append row', 'append rows', 'insert row', 'insert rows',
+    'clean', 'sanitize', 'normalize', 'standardize', 'coerce', 'cast',
+    'make numeric', 'convert to numeric', 'numbers only', 'no strings',
+    'only positive', 'make positive', 'absolute values', 'absolute value',
+    'fix datatypes', 'fix data types', 'convert type', 'convert column',
 }
 _TABLE_INTENT_KW = {
     'separate table',
+    'separate result table',
+    'separate extracted table',
     'another table',
     'new table',
+    'result table',
+    'extracted table',
     'extract columns',
     'extract these columns',
     'only these columns',
     'table view',
     'split table',
+    'pivot table',
+    'pivot-style matrix',
 }
 
 
@@ -150,6 +195,111 @@ def _build_system_prompt(prompt: str) -> str:
     if any(k in p for k in _TIME_KW):
         parts.append(TIME_RULES)
     return "\n".join(parts)
+
+
+def supports_thinking_model(model_name: str) -> bool:
+    return model_name in THINKING_SUPPORTED_MODELS
+
+
+def _build_output_contract(thinking_mode: bool) -> str:
+    return THINKING_JSON_OUTPUT_CONTRACT if thinking_mode else JSON_OUTPUT_CONTRACT
+
+
+def _trim_reasoning_text(value: Any, max_len: int) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 3].rstrip() + "..."
+
+
+def _normalize_reasoning_steps(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+
+    normalized: list[dict[str, str]] = []
+    for item in value[:4]:
+        if not isinstance(item, dict):
+            continue
+
+        kind = str(item.get("kind") or "").strip().lower()
+        title = _trim_reasoning_text(item.get("title"), 40)
+        content = _trim_reasoning_text(item.get("content"), 220)
+        status = str(item.get("status") or "completed").strip().lower()
+
+        if kind not in {"thought", "action", "observation"}:
+            continue
+        if not title or not content:
+            continue
+        if status not in {"completed", "error"}:
+            status = "completed"
+
+        normalized.append({
+            "kind": kind,
+            "title": title,
+            "content": content,
+            "status": status,
+        })
+
+    return normalized
+
+
+def _describe_action_type(action_type: str) -> str:
+    mapping = {
+        "query": "query the current dataset",
+        "mutation": "modify the working dataset",
+        "visualization": "build the requested visualization",
+        "combined": "update the data and produce the requested result",
+    }
+    return mapping.get(action_type, "analyze the current dataset")
+
+
+def _fallback_reasoning_steps(
+    *,
+    prompt: str,
+    action_type: str,
+    columns: list[str] | None = None,
+    error_message: str | None = None,
+) -> list[dict[str, str]]:
+    column_count = len(columns or [])
+    dataset_note = (
+        f"Use the available schema with {column_count} columns to anchor the plan."
+        if column_count
+        else "Use the available dataset schema to anchor the plan."
+    )
+    action_summary = _describe_action_type(action_type)
+
+    steps = [
+        {
+            "kind": "thought",
+            "title": "Understand request",
+            "content": _trim_reasoning_text(prompt, 180) or "Interpret the user's data task.",
+            "status": "completed",
+        },
+        {
+            "kind": "action",
+            "title": "Inspect schema",
+            "content": dataset_note,
+            "status": "completed",
+        },
+        {
+            "kind": "action",
+            "title": "Plan execution",
+            "content": f"Generate pandas and Plotly code to {action_summary}.",
+            "status": "completed",
+        },
+    ]
+
+    if error_message:
+        steps.append({
+            "kind": "thought",
+            "title": "Repair failure",
+            "content": _trim_reasoning_text(error_message, 180),
+            "status": "completed",
+        })
+
+    return steps[:4]
 
 
 def _is_mutation_only(prompt: str) -> bool:
@@ -172,7 +322,7 @@ def _extract_mentioned_columns(prompt: str, columns: list[str]) -> set[str]:
 
 def _wants_separate_table(prompt: str) -> bool:
     p = prompt.lower()
-    return any(k in p for k in _TABLE_INTENT_KW)
+    return "[force_extract_table]" in p or any(k in p for k in _TABLE_INTENT_KW) or "pivot" in p or bool(re.search(r"\bextract\b", p))
 
 
 def _extract_first_object(text: str) -> str:
@@ -213,9 +363,23 @@ def _extract_last_likely_json_object(text: str) -> str | None:
     candidates: list[str] = []
     for match in re.finditer(r"\{", text):
         candidate = _extract_first_object(text[match.start():]).strip()
-        if candidate.startswith("{") and '"code"' in candidate and '"assistant_reply"' in candidate:
+        looks_like_standard = '"code"' in candidate and '"assistant_reply"' in candidate
+        looks_like_thinking = '"kind"' in candidate and ('"tool"' in candidate or '"final_answer"' in candidate)
+        looks_like_pythonish_thinking = (
+            re.search(r"\bkind\b", candidate) and
+            (re.search(r"\btool\b", candidate) or re.search(r"\bfinal_answer\b", candidate))
+        )
+        if candidate.startswith("{") and (looks_like_standard or looks_like_thinking or looks_like_pythonish_thinking):
             candidates.append(candidate)
     return candidates[-1] if candidates else None
+
+
+def _repair_common_json_issues(text: str) -> str:
+    repaired = text.replace("\u201c", '"').replace("\u201d", '"').replace("\u2019", "'")
+    repaired = repaired.replace("\\\r\n", "\\n").replace("\\\n", "\\n")
+    repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
+    repaired = re.sub(r"([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*:)", r'\1"\2"\3', repaired)
+    return repaired
 
 
 def _extract_json(raw: str) -> dict[str, Any]:
@@ -236,9 +400,7 @@ def _extract_json(raw: str) -> dict[str, Any]:
 
     # Second attempt: repair common malformed JSON issues.
     try:
-        repaired_json = text.replace("\u201c", '"').replace("\u201d", '"').replace("\u2019", "'")
-        repaired_json = repaired_json.replace("\\\r\n", "\\n").replace("\\\n", "\\n")
-        repaired_json = re.sub(r",\s*([}\]])", r"\1", repaired_json)
+        repaired_json = _repair_common_json_issues(text)
         payload = json.loads(repaired_json)
         if not isinstance(payload, dict):
             raise ValueError("Expected JSON object")
@@ -248,8 +410,10 @@ def _extract_json(raw: str) -> dict[str, Any]:
 
     # Fallback for models that return Python-like dicts with single quotes.
     try:
-        repaired = text.replace("\u201c", '"').replace("\u201d", '"').replace("\u2019", "'")
-        repaired = repaired.replace("\\\r\n", "\\n").replace("\\\n", "\\n")
+        repaired = _repair_common_json_issues(text)
+        repaired = re.sub(r"\btrue\b", "True", repaired)
+        repaired = re.sub(r"\bfalse\b", "False", repaired)
+        repaired = re.sub(r"\bnull\b", "None", repaired)
         payload = ast.literal_eval(repaired)
         if not isinstance(payload, dict):
             raise ValueError("Expected JSON object")
@@ -285,10 +449,15 @@ def _parse_model_response(raw: str) -> dict[str, Any]:
 
 def _invoke_model(*, model_name: str, system_prompt: str, user_message: str) -> tuple[str, dict[str, int]]:
     usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    normalized_model = str(model_name or "").strip()
+    if not normalized_model:
+        raise RuntimeError("Model name is required. Silent fallback to Gemini 3.1 Flash Lite is disabled.")
 
-    if model_name and (model_name.startswith("openai/") or model_name.startswith("gpt-")):
-        if model_name.startswith("openai/"):
-            model_name = model_name[7:]
+    logger.info("invoke_model model=%s", normalized_model)
+
+    if normalized_model.startswith("openai/") or normalized_model.startswith("gpt-"):
+        if normalized_model.startswith("openai/"):
+            normalized_model = normalized_model[7:]
             
         from azure.ai.inference import ChatCompletionsClient
         from azure.ai.inference.models import SystemMessage, UserMessage
@@ -306,7 +475,7 @@ def _invoke_model(*, model_name: str, system_prompt: str, user_message: str) -> 
         response = client.complete(
             messages=[SystemMessage(system_prompt), UserMessage(user_message)],
             temperature=0,
-            model=model_name,
+            model=normalized_model,
         )
         raw = response.choices[0].message.content or ""
         if hasattr(response, "usage") and response.usage:
@@ -315,7 +484,7 @@ def _invoke_model(*, model_name: str, system_prompt: str, user_message: str) -> 
             usage["total_tokens"] = response.usage.total_tokens
         return raw, usage
 
-    if model_name and (model_name.startswith("minimax") or model_name.startswith("meta/")):
+    if normalized_model.startswith("minimax") or normalized_model.startswith("meta/"):
         from openai import OpenAI
 
         nvidia_api_key = os.getenv("NVIDIA_API_KEY")
@@ -329,7 +498,7 @@ def _invoke_model(*, model_name: str, system_prompt: str, user_message: str) -> 
 
         messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_message}]
         request_payload = {
-            "model": model_name,
+            "model": normalized_model,
             "messages": messages,
             "temperature": 0,
             "max_tokens": 8192,
@@ -360,14 +529,14 @@ def _invoke_model(*, model_name: str, system_prompt: str, user_message: str) -> 
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY not set")
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(model_name or "gemini-3.1-flash-lite-preview")
+    model = genai.GenerativeModel(normalized_model)
     generation_config: dict[str, Any] = {"temperature": 0}
     # Enable JSON mode for Gemini-hosted Gemini and Gemma models.
     if (
-        (model_name or "").startswith("gemini")
-        or (model_name or "").startswith("models/gemini")
-        or (model_name or "").startswith("gemma")
-        or (model_name or "").startswith("models/gemma")
+        normalized_model.startswith("gemini")
+        or normalized_model.startswith("models/gemini")
+        or normalized_model.startswith("gemma")
+        or normalized_model.startswith("models/gemma")
     ):
         generation_config["response_mime_type"] = "application/json"
 
@@ -383,6 +552,71 @@ def _invoke_model(*, model_name: str, system_prompt: str, user_message: str) -> 
         usage["completion_tokens"] = response.usage_metadata.candidates_token_count
         usage["total_tokens"] = response.usage_metadata.total_token_count
     return raw, usage
+
+
+def invoke_model_json(*, model_name: str, system_prompt: str, user_message: str) -> tuple[dict[str, Any], dict[str, int], str]:
+    raw, usage = _invoke_model(model_name=model_name, system_prompt=system_prompt, user_message=user_message)
+    payload = _extract_json(raw)
+    if not isinstance(payload, dict):
+        raise ValueError("Expected JSON object from model")
+    return payload, usage, raw
+
+
+def clean_final_reply_text(reply: str, *, initial_reply: str, wants_list: bool = False) -> str:
+    text = str(reply or "").replace("\r\n", "\n").strip()
+    if not text:
+        return initial_reply
+
+    meta_prefixes = (
+        "user's goal:",
+        "user's specific request",
+        "execution output:",
+        "constraints:",
+        "movies listed:",
+        "the execution output",
+        "the output shows",
+        "provide an extremely concise",
+        "prefer one short sentence",
+        "based only on",
+        "no markdown",
+        "no ascii tables",
+        "extremely concise",
+        "no elaboration",
+    )
+    meta_contains = (
+        "? yes.",
+        "? no.",
+    )
+
+    cleaned_lines: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        lower = line.lower()
+        if lower.startswith(meta_prefixes):
+            continue
+        if any(token in lower for token in meta_contains):
+            continue
+        cleaned_lines.append(line)
+
+    if wants_list:
+        bullet_lines = [line for line in cleaned_lines if line.startswith(("-", "*"))]
+        if bullet_lines:
+            unique_bullets: list[str] = []
+            for line in bullet_lines:
+                normalized = line.strip()
+                if normalized not in unique_bullets:
+                    unique_bullets.append(normalized)
+            return "\n".join(unique_bullets)
+
+    for line in reversed(cleaned_lines):
+        candidate = line.strip().strip("`").strip("\"'")
+        if not candidate:
+            continue
+        return candidate
+
+    return initial_reply
 
 
 def _trim_history(history: list[dict[str, str]], max_turns: int = 3) -> list[dict[str, str]]:
@@ -408,8 +642,11 @@ def generate_code(
     top_categories: dict[str, list],
     sample_rows: list[dict[str, Any]],
     history: list[dict[str, str]],
+    thinking_mode: bool = False,
 ) -> dict[str, Any]:
     system_prompt = _build_system_prompt(prompt)
+    if thinking_mode:
+        system_prompt = f"{system_prompt}\n\n{THINKING_TRACE_PROMPT}"
     trimmed_history = _trim_history(history)
     is_mutation = _is_mutation_only(prompt)
     mentioned = _extract_mentioned_columns(prompt, columns)
@@ -452,7 +689,7 @@ def generate_code(
     if trimmed_history:
         ctx.append(f"History: {json.dumps(trimmed_history)}")
 
-    ctx.append(JSON_OUTPUT_CONTRACT)
+    ctx.append(_build_output_contract(thinking_mode))
 
     user_message = "\n".join(ctx)
     raw, usage = _invoke_model(model_name=model_name, system_prompt=system_prompt, user_message=user_message)
@@ -461,16 +698,21 @@ def generate_code(
     code = payload.get("code", "")
     reply = payload.get("assistant_reply", "Done.")
     action = payload.get("action_type", "query")
+    reasoning_steps = _normalize_reasoning_steps(payload.get("reasoning_steps")) if thinking_mode else []
     table_request = payload.get("table_request") or {}
     table_enabled = bool(table_request.get("enabled", False))
     table_title = str(table_request.get("title") or "Query Table").strip()
     if not table_title:
         table_title = "Query Table"
 
-    if _wants_separate_table(prompt) and action in ("query", "combined"):
+    explicit_table_intent = _wants_separate_table(prompt)
+
+    if explicit_table_intent:
         table_enabled = True
         if table_title == "Query Table":
             table_title = "Extracted Table"
+    elif not explicit_table_intent:
+        table_enabled = False
 
     # Deterministic fallback keeps execution functional.
     if not isinstance(code, str) or not code.strip():
@@ -478,13 +720,16 @@ def generate_code(
         if not isinstance(reply, str) or not reply.strip():
             reply = "I could not generate transformation code reliably, so I returned a snapshot of the current data."
         action = "query"
-        table_enabled = False
-        table_title = "Query Table"
+        if not explicit_table_intent:
+            table_enabled = False
+            table_title = "Query Table"
 
     if not isinstance(reply, str):
         reply = "Done."
     if action not in ("query", "mutation", "visualization", "combined"):
         action = "query"
+    if thinking_mode and not reasoning_steps:
+        reasoning_steps = _fallback_reasoning_steps(prompt=prompt, action_type=action, columns=columns)
 
     return {
         "code": code,
@@ -492,6 +737,7 @@ def generate_code(
         "action_type": action,
         "token_usage": usage,
         "table_request": {"enabled": table_enabled, "title": table_title},
+        "reasoning_steps": reasoning_steps,
     }
 
 
@@ -503,8 +749,11 @@ def generate_fix(
     dtypes: dict[str, str],
     original_code: str,
     error_message: str,
+    thinking_mode: bool = False,
 ) -> dict[str, Any]:
     system_prompt = _build_system_prompt(prompt)
+    if thinking_mode:
+        system_prompt = f"{system_prompt}\n\n{THINKING_TRACE_PROMPT}"
 
     user_message = f"""Original request: {prompt}
 Columns: {json.dumps(columns)}
@@ -523,7 +772,7 @@ COMMON FIXES:
 - Ensure variables are defined before use
 - Use single quotes for strings
 
-{JSON_OUTPUT_CONTRACT}
+{_build_output_contract(thinking_mode)}
 
 Return fixed JSON."""
 
@@ -533,25 +782,41 @@ Return fixed JSON."""
     code = payload.get("code", "")
     reply = payload.get("assistant_reply", "Done.")
     action = payload.get("action_type", "query")
+    reasoning_steps = _normalize_reasoning_steps(payload.get("reasoning_steps")) if thinking_mode else []
     table_request = payload.get("table_request") or {}
     table_enabled = bool(table_request.get("enabled", False))
     table_title = str(table_request.get("title") or "Query Table").strip()
     if not table_title:
         table_title = "Query Table"
 
-    if _wants_separate_table(prompt) and action in ("query", "combined"):
+    explicit_table_intent = _wants_separate_table(prompt)
+
+    if explicit_table_intent:
         table_enabled = True
         if table_title == "Query Table":
             table_title = "Extracted Table"
+    elif not explicit_table_intent:
+        table_enabled = False
 
     if not isinstance(code, str) or not code.strip():
         code = original_code if isinstance(original_code, str) and original_code.strip() else "print_table(max_rows=10)\nresult_df=df"
         if not isinstance(reply, str) or not reply.strip():
             reply = "I could not produce a reliable fix; retrying with the previous code."
         action = "query"
+        if explicit_table_intent:
+            table_enabled = True
+            if table_title == "Query Table":
+                table_title = "Extracted Table"
 
     if action not in ("query", "mutation", "visualization", "combined"):
         action = "query"
+    if thinking_mode and not reasoning_steps:
+        reasoning_steps = _fallback_reasoning_steps(
+            prompt=prompt,
+            action_type=action,
+            columns=columns,
+            error_message=error_message,
+        )
 
     return {
         "code": code,
@@ -559,6 +824,7 @@ Return fixed JSON."""
         "action_type": action,
         "token_usage": usage,
         "table_request": {"enabled": table_enabled, "title": table_title},
+        "reasoning_steps": reasoning_steps,
     }
 
 
@@ -569,18 +835,24 @@ def draft_final_reply(
     initial_reply: str,
 ) -> dict[str, Any]:
     if not query_output or len(query_output.strip()) < 10:
-        return {"reply": initial_reply, "token_usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}
+        return {
+            "reply": clean_final_reply_text(initial_reply, initial_reply=initial_reply, wants_list=False),
+            "token_usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        }
 
     api_key = os.getenv("GEMINI_API_KEY")
     output = query_output[:2000] if len(query_output) > 2000 else query_output
+    prompt_lower = prompt.lower()
+    wants_list = any(keyword in prompt_lower for keyword in ("list", "print", "give me", "show me"))
 
     user_message = f"""User asked: {prompt}
 
 Execution output:
 {output}
 
-Provide an extremely concise, direct, one-sentence answer based ONLY on this output. 
-DO NOT elaborate, DO NOT detail data characteristics, and DO NOT use bullet points unless the user explicitly asked you to explain or elaborate. Focus only on the exact core request.
+Provide an extremely concise, direct answer based ONLY on this output.
+{"If the user asked to list/print/show/give items and the result is 10 items or fewer, format the answer as clean markdown bullet points. Each bullet should contain only the most relevant identifier first, such as title/name/item, plus one important value only if the user asked for it. Do NOT dump entire rows or include index columns unless the user asked for them." if wants_list else "Prefer one short sentence unless the user explicitly asked for a list."}
+DO NOT elaborate and DO NOT detail unrelated data characteristics. Focus only on the exact core request.
 Never output markdown or ASCII tables in this response."""
 
     usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
@@ -607,7 +879,11 @@ Never output markdown or ASCII tables in this response."""
             temperature=0,
             model=model_name,
         )
-        reply = response.choices[0].message.content or initial_reply
+        reply = clean_final_reply_text(
+            response.choices[0].message.content or initial_reply,
+            initial_reply=initial_reply,
+            wants_list=wants_list,
+        )
         if hasattr(response, "usage") and response.usage:
             usage["prompt_tokens"] = response.usage.prompt_tokens
             usage["completion_tokens"] = response.usage.completion_tokens
@@ -616,14 +892,21 @@ Never output markdown or ASCII tables in this response."""
     else:
         if not api_key:
             return {"reply": initial_reply, "token_usage": usage}
+        normalized_model = str(model_name or "").strip()
+        if not normalized_model:
+            return {"reply": clean_final_reply_text(initial_reply, initial_reply=initial_reply, wants_list=wants_list), "token_usage": usage}
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(model_name or "gemini-3.1-flash-lite-preview")
+        model = genai.GenerativeModel(normalized_model)
         try:
             response = model.generate_content([
                 "Summarize data results clearly and concisely. Do not output markdown or ASCII tables.",
                 user_message
             ])
-            reply = response.text or initial_reply
+            reply = clean_final_reply_text(
+                response.text or initial_reply,
+                initial_reply=initial_reply,
+                wants_list=wants_list,
+            )
             if hasattr(response, "usage_metadata") and response.usage_metadata:
                 usage["prompt_tokens"] = response.usage_metadata.prompt_token_count
                 usage["completion_tokens"] = response.usage_metadata.candidates_token_count

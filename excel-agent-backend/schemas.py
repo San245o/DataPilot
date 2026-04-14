@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -12,7 +12,8 @@ class AgentRequest(BaseModel):
     prompt: str
     rows: list[dict[str, Any]] = Field(default_factory=list)
     dataset_id: str | None = None
-    model: str = "gemini-3.1-flash-lite-preview"
+    model: str = ""
+    thinking_mode: bool = False
     history: list[ChatMessage] = Field(default_factory=list)
 
 
@@ -38,6 +39,19 @@ class QueryTable(BaseModel):
     rows: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class HighlightedColumn(BaseModel):
+    column: str
+
+
+class ThinkingTraceEntry(BaseModel):
+    kind: Literal["thought", "action", "observation"]
+    content: str
+    tool_name: str | None = None
+    tool_input: str | None = None
+    details: str | None = None
+    status: Literal["completed", "error"] = "completed"
+
+
 class AgentResponse(BaseModel):
     rows: list[dict[str, Any]]
     visualization: dict[str, Any] | None = None
@@ -48,4 +62,6 @@ class AgentResponse(BaseModel):
     context_preview: dict[str, Any]
     mutation: bool = False
     highlight_indices: list[int] = Field(default_factory=list)
+    highlighted_columns: list[HighlightedColumn] = Field(default_factory=list)
+    thinking_trace: list[ThinkingTraceEntry] = Field(default_factory=list)
     token_usage: TokenUsage | None = None
