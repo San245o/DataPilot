@@ -3,7 +3,7 @@
 import { Suspense, useEffect, useMemo, useState, useSyncExternalStore } from "react"
 import { useSearchParams } from "next/navigation"
 import { Moon, Sun } from "lucide-react"
-import type { Data, Layout } from "plotly.js"
+import type { Data, Frame, Layout } from "plotly.js"
 
 import { PlotlyBoard } from "@/components/charts/plotly-board"
 
@@ -11,6 +11,7 @@ type StoredChartPayload = {
   title: string
   data: Data[]
   layout?: Partial<Layout>
+  frames?: Frame[]
   isDark?: boolean
 }
 
@@ -112,7 +113,12 @@ function ChartViewerState({ chartKey, isHydrated }: ChartViewerStateProps) {
       </header>
       <div className="relative z-10 min-h-0 flex-1 p-4">
         <div className="h-full w-full overflow-hidden rounded-[24px] border border-border/60 bg-card/58 p-4 shadow-[0_30px_80px_-44px_rgba(0,0,0,0.62)] backdrop-blur-2xl">
-          <PlotlyBoard data={payload.data} layout={chartLayout ?? payload.layout} isDark={isDark} />
+          <PlotlyBoard
+            data={payload.data}
+            layout={chartLayout ?? payload.layout}
+            frames={payload.frames}
+            isDark={isDark}
+          />
         </div>
       </div>
     </main>

@@ -82,6 +82,7 @@ export function CanvasBoard({
           title: widget.title,
           data: widget.data,
           layout: widget.layout,
+          frames: widget.frames,
           isDark,
         })
       )
@@ -333,7 +334,7 @@ export function CanvasBoard({
                 </div>
 
                 <div className="min-h-0 flex-1 p-1">
-                  <PlotlyBoard data={widget.data} layout={widget.layout} isDark={isDark} />
+                  <PlotlyBoard data={widget.data} layout={widget.layout} frames={widget.frames} isDark={isDark} />
                 </div>
 
                 <div

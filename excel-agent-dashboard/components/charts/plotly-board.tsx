@@ -1,7 +1,7 @@
 "use client"
 
 import dynamic from "next/dynamic"
-import type { Data, Layout } from "plotly.js"
+import type { Data, Frame, Layout } from "plotly.js"
 
 const Plot = dynamic(async () => {
   const createPlotlyComponent = (await import("react-plotly.js/factory")).default
@@ -12,10 +12,11 @@ const Plot = dynamic(async () => {
 type PlotlyBoardProps = {
   data: Data[]
   layout?: Partial<Layout>
+  frames?: Frame[]
   isDark?: boolean
 }
 
-export function PlotlyBoard({ data, layout, isDark = true }: PlotlyBoardProps) {
+export function PlotlyBoard({ data, layout, frames, isDark = true }: PlotlyBoardProps) {
   const fontColor = isDark ? "#aab8cb" : "#334155"
   const titleColor = isDark ? "#e6edf5" : "#1f2d3d"
   const gridColor = isDark ? "rgba(148,163,184,0.08)" : "rgba(0,0,0,0.05)"
@@ -103,6 +104,7 @@ export function PlotlyBoard({ data, layout, isDark = true }: PlotlyBoardProps) {
     <Plot
       data={data}
       layout={mergedLayout}
+      frames={frames}
       config={{
         displaylogo: false,
         responsive: true,

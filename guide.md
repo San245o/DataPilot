@@ -188,8 +188,8 @@ Path aliases such as @/* continue to work through the existing Next.js/TypeScrip
 ### Frontend
 
 1. cd excel-agent-dashboard
-2. npm install (or pnpm install)
-3. npm run dev (or pnpm dev)
+2. pnpm install
+3. pnpm dev
 4. open http://localhost:3000
 
 ## 8. Troubleshooting

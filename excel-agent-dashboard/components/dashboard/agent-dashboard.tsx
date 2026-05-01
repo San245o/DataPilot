@@ -235,6 +235,7 @@ export function AgentDashboard() {
           title: `Chart ${nextIndex + 1}`,
           data: visualization.data ?? [],
           layout: visualization.layout,
+          frames: visualization.frames,
           x: 20 + (nextIndex % 3) * 40,
           y: 20 + (nextIndex % 3) * 30,
           width: 460,

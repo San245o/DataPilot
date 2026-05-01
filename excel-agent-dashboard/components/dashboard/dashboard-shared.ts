@@ -1,5 +1,5 @@
 import { Layers, Upload, type LucideIcon } from "lucide-react"
-import type { Data, Layout } from "plotly.js"
+import type { Data, Frame, Layout } from "plotly.js"
 
 export type CellValue = string | number | boolean | null
 export type SheetRow = Record<string, CellValue>
@@ -7,6 +7,7 @@ export type SheetRow = Record<string, CellValue>
 export type VisualizationPayload = {
   data?: Data[]
   layout?: Partial<Layout>
+  frames?: Frame[]
 }
 
 export type QueryTablePayload = {
@@ -65,6 +66,7 @@ export type VizWidget = {
   title: string
   data: Data[]
   layout?: Partial<Layout>
+  frames?: Frame[]
   x: number
   y: number
   width: number

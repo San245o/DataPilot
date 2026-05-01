@@ -11,8 +11,8 @@ This workspace contains:
 From the project root:
 
 ```bash
-npm install
-npm run dev
+pnpm install
+pnpm dev
 ```
 
 Frontend URL: http://localhost:3000
