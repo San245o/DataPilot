@@ -1,10 +1,22 @@
 "use client"
 
-import { useEffect, useMemo, useRef, useState } from "react"
-import { ChevronDown, ChevronLeft, ChevronRight, Maximize2, Minimize2, X } from "lucide-react"
+import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react"
+import { ChevronDown, ChevronLeft, ChevronRight, Maximize2, Minimize2, Redo2, Undo2, X } from "lucide-react"
 
-import { OVERSCAN, ROW_HEIGHT, type HighlightedColumn, type PivotTableTab, type SheetRow } from "@/components/dashboard/dashboard-shared"
+import {
+  OVERSCAN,
+  ROW_HEIGHT,
+  type CellRangeSelection,
+  type ColumnRangeSelection,
+  type DataGridSelection,
+  type HighlightedColumn,
+  type PivotTableTab,
+  type RowRangeSelection,
+  type SheetRow,
+} from "@/components/dashboard/dashboard-shared"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+
+const ROW_GUTTER_WIDTH = 48
 
 type DataGridProps = {
   rows: SheetRow[]
@@ -12,10 +24,16 @@ type DataGridProps = {
   activeDataTab: string
   highlightedRows: Set<number>
   highlightedColumns: HighlightedColumn[]
+  selection: DataGridSelection
   fullscreen: boolean
+  canRevert: boolean
+  canRestore: boolean
+  onSelectionChange: (selection: DataGridSelection) => void
   onActivateBaseData: () => void
   onOpenPivotTable: (pivotId: string) => void
   onClosePivotTable: (pivotId: string) => void
+  onRevert: () => void
+  onRestore: () => void
   onToggleFullscreen: () => void
 }
 
@@ -25,10 +43,16 @@ export function DataGrid({
   activeDataTab,
   highlightedRows,
   highlightedColumns,
+  selection,
   fullscreen,
+  canRevert,
+  canRestore,
+  onSelectionChange,
   onActivateBaseData,
   onOpenPivotTable,
   onClosePivotTable,
+  onRevert,
+  onRestore,
   onToggleFullscreen,
 }: DataGridProps) {
   const [pivotMenuOpen, setPivotMenuOpen] = useState(false)
@@ -39,12 +63,24 @@ export function DataGrid({
 
   const tableContainerRef = useRef<HTMLDivElement | null>(null)
   const resizingCol = useRef<{ key: string; startX: number; startWidth: number } | null>(null)
+  const selectionAnchorRef = useRef<{
+    kind: "cell" | "row" | "column"
+    rowIndex?: number
+    columnIndex?: number
+  } | null>(null)
+  const [selectionDrag, setSelectionDrag] = useState<{
+    kind: "cell" | "row" | "column"
+    anchorRowIndex?: number
+    anchorColumnIndex?: number
+    baseSelection: DataGridSelection
+  } | null>(null)
 
   const activePivotTable = useMemo(
     () => pivotTables.find((table) => table.id === activeDataTab && table.open),
     [activeDataTab, pivotTables]
   )
   const isBaseDataTab = activeDataTab === "base" || !activePivotTable
+  const selectionEnabled = isBaseDataTab
   const tableRows = isBaseDataTab ? rows : (activePivotTable?.rows ?? rows)
   const headers = useMemo(() => Object.keys(tableRows[0] ?? {}), [tableRows])
   const tableShapeLabel = useMemo(
@@ -64,7 +100,7 @@ export function DataGrid({
     return set
   }, [highlightedColumns, isBaseDataTab])
   const totalTableWidth = useMemo(
-    () => Math.max(headers.reduce((sum, header) => sum + (colWidths[header] || 150), 0), 100),
+    () => Math.max(headers.reduce((sum, header) => sum + (colWidths[header] || 150), ROW_GUTTER_WIDTH), 100),
     [colWidths, headers]
   )
 
@@ -130,6 +166,192 @@ export function DataGrid({
     if (!tableContainer) return
     tableContainer.scrollTop = 0
   }, [activeDataTab])
+
+  useEffect(() => {
+    if (!selectionDrag) return
+
+    const handleMouseUp = () => setSelectionDrag(null)
+    window.addEventListener("mouseup", handleMouseUp)
+    return () => window.removeEventListener("mouseup", handleMouseUp)
+  }, [selectionDrag])
+
+  const emptySelection = (): DataGridSelection => ({
+    rowRanges: [],
+    columnRanges: [],
+    cellRanges: [],
+  })
+
+  const normalizeRowRange = (range: RowRangeSelection): RowRangeSelection => ({
+    startRowIndex: Math.max(0, Math.min(range.startRowIndex, range.endRowIndex)),
+    endRowIndex: Math.max(0, Math.max(range.startRowIndex, range.endRowIndex)),
+  })
+
+  const normalizeColumnRange = (range: ColumnRangeSelection): ColumnRangeSelection => ({
+    startColumnIndex: Math.max(0, Math.min(range.startColumnIndex, range.endColumnIndex)),
+    endColumnIndex: Math.min(headers.length - 1, Math.max(range.startColumnIndex, range.endColumnIndex)),
+  })
+
+  const normalizeCellRange = (range: CellRangeSelection): CellRangeSelection => ({
+    startRowIndex: Math.max(0, Math.min(range.startRowIndex, range.endRowIndex)),
+    endRowIndex: Math.max(0, Math.max(range.startRowIndex, range.endRowIndex)),
+    startColumnIndex: Math.max(0, Math.min(range.startColumnIndex, range.endColumnIndex)),
+    endColumnIndex: Math.min(headers.length - 1, Math.max(range.startColumnIndex, range.endColumnIndex)),
+  })
+
+  const applyRangeSelection = (
+    baseSelection: DataGridSelection,
+    kind: "cell" | "row" | "column",
+    range: CellRangeSelection | RowRangeSelection | ColumnRangeSelection
+  ) => {
+    if (kind === "cell") {
+      return {
+        ...baseSelection,
+        cellRanges: [...baseSelection.cellRanges, normalizeCellRange(range as CellRangeSelection)],
+      }
+    }
+
+    if (kind === "row") {
+      return {
+        ...baseSelection,
+        rowRanges: [...baseSelection.rowRanges, normalizeRowRange(range as RowRangeSelection)],
+      }
+    }
+
+    return {
+      ...baseSelection,
+      columnRanges: [...baseSelection.columnRanges, normalizeColumnRange(range as ColumnRangeSelection)],
+    }
+  }
+
+  const isAdditiveSelection = (event: ReactMouseEvent) => event.metaKey || event.ctrlKey
+
+  const startCellSelection = (event: ReactMouseEvent, rowIndex: number, columnIndex: number) => {
+    if (!selectionEnabled) return
+    event.preventDefault()
+
+    const existingAnchor = selectionAnchorRef.current
+    const useExistingAnchor = event.shiftKey && existingAnchor?.kind === "cell"
+    const anchorRowIndex = useExistingAnchor ? existingAnchor.rowIndex ?? rowIndex : rowIndex
+    const anchorColumnIndex = useExistingAnchor ? existingAnchor.columnIndex ?? columnIndex : columnIndex
+    const baseSelection = isAdditiveSelection(event) ? selection : emptySelection()
+
+    if (!useExistingAnchor) {
+      selectionAnchorRef.current = { kind: "cell", rowIndex, columnIndex }
+    }
+
+    setSelectionDrag({ kind: "cell", anchorRowIndex, anchorColumnIndex, baseSelection })
+    onSelectionChange(
+      applyRangeSelection(baseSelection, "cell", {
+        startRowIndex: anchorRowIndex,
+        endRowIndex: rowIndex,
+        startColumnIndex: anchorColumnIndex,
+        endColumnIndex: columnIndex,
+      })
+    )
+  }
+
+  const startRowSelection = (event: ReactMouseEvent, rowIndex: number) => {
+    if (!selectionEnabled) return
+    event.preventDefault()
+
+    const existingAnchor = selectionAnchorRef.current
+    const useExistingAnchor = event.shiftKey && existingAnchor?.kind === "row"
+    const anchorRowIndex = useExistingAnchor ? existingAnchor.rowIndex ?? rowIndex : rowIndex
+    const baseSelection = isAdditiveSelection(event) ? selection : emptySelection()
+
+    if (!useExistingAnchor) {
+      selectionAnchorRef.current = { kind: "row", rowIndex }
+    }
+
+    setSelectionDrag({ kind: "row", anchorRowIndex, baseSelection })
+    onSelectionChange(
+      applyRangeSelection(baseSelection, "row", {
+        startRowIndex: anchorRowIndex,
+        endRowIndex: rowIndex,
+      })
+    )
+  }
+
+  const startColumnSelection = (event: ReactMouseEvent, columnIndex: number) => {
+    if (!selectionEnabled) return
+    if ((event.target as HTMLElement).closest("[data-resize-handle]")) return
+    event.preventDefault()
+
+    const existingAnchor = selectionAnchorRef.current
+    const useExistingAnchor = event.shiftKey && existingAnchor?.kind === "column"
+    const anchorColumnIndex = useExistingAnchor ? existingAnchor.columnIndex ?? columnIndex : columnIndex
+    const baseSelection = isAdditiveSelection(event) ? selection : emptySelection()
+
+    if (!useExistingAnchor) {
+      selectionAnchorRef.current = { kind: "column", columnIndex }
+    }
+
+    setSelectionDrag({ kind: "column", anchorColumnIndex, baseSelection })
+    onSelectionChange(
+      applyRangeSelection(baseSelection, "column", {
+        startColumnIndex: anchorColumnIndex,
+        endColumnIndex: columnIndex,
+      })
+    )
+  }
+
+  const extendCellSelection = (rowIndex: number, columnIndex: number) => {
+    if (selectionDrag?.kind !== "cell") return
+    onSelectionChange(
+      applyRangeSelection(selectionDrag.baseSelection, "cell", {
+        startRowIndex: selectionDrag.anchorRowIndex ?? rowIndex,
+        endRowIndex: rowIndex,
+        startColumnIndex: selectionDrag.anchorColumnIndex ?? columnIndex,
+        endColumnIndex: columnIndex,
+      })
+    )
+  }
+
+  const extendRowSelection = (rowIndex: number) => {
+    if (selectionDrag?.kind !== "row") return
+    onSelectionChange(
+      applyRangeSelection(selectionDrag.baseSelection, "row", {
+        startRowIndex: selectionDrag.anchorRowIndex ?? rowIndex,
+        endRowIndex: rowIndex,
+      })
+    )
+  }
+
+  const extendColumnSelection = (columnIndex: number) => {
+    if (selectionDrag?.kind !== "column") return
+    onSelectionChange(
+      applyRangeSelection(selectionDrag.baseSelection, "column", {
+        startColumnIndex: selectionDrag.anchorColumnIndex ?? columnIndex,
+        endColumnIndex: columnIndex,
+      })
+    )
+  }
+
+  const isRowSelected = (rowIndex: number) =>
+    selection.rowRanges.some((range) => {
+      const normalized = normalizeRowRange(range)
+      return rowIndex >= normalized.startRowIndex && rowIndex <= normalized.endRowIndex
+    })
+
+  const isColumnSelected = (columnIndex: number) =>
+    selection.columnRanges.some((range) => {
+      const normalized = normalizeColumnRange(range)
+      return columnIndex >= normalized.startColumnIndex && columnIndex <= normalized.endColumnIndex
+    })
+
+  const isCellRangeSelected = (rowIndex: number, columnIndex: number) =>
+    selection.cellRanges.some((range) => {
+      const normalized = normalizeCellRange(range)
+      return (
+        rowIndex >= normalized.startRowIndex &&
+        rowIndex <= normalized.endRowIndex &&
+        columnIndex >= normalized.startColumnIndex &&
+        columnIndex <= normalized.endColumnIndex
+      )
+    })
+
+  const isCellSelected = (rowIndex: number, columnIndex: number) =>
+    selectionEnabled && (isRowSelected(rowIndex) || isColumnSelected(columnIndex) || isCellRangeSelected(rowIndex, columnIndex))
 
   const activeHighlightIndex =
     highlightedRowsArray.length === 0
@@ -283,6 +505,29 @@ export function DataGrid({
             </div>
           )}
 
+          <div className="mr-1 flex items-center gap-0.5">
+            <button
+              type="button"
+              onClick={onRevert}
+              disabled={!canRevert}
+              className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-35"
+              title="Revert data change"
+              aria-label="Revert data change"
+            >
+              <Undo2 className="size-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={onRestore}
+              disabled={!canRestore}
+              className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-35"
+              title="Restore data change"
+              aria-label="Restore data change"
+            >
+              <Redo2 className="size-3.5" />
+            </button>
+          </div>
+
           <span className="text-[10px] text-muted-foreground">{tableShapeLabel}</span>
           <button
             type="button"
@@ -304,16 +549,37 @@ export function DataGrid({
           <Table className="table-fixed" style={{ width: `max(100%, ${totalTableWidth}px)` }}>
             <TableHeader>
               <TableRow className="border-b-border hover:bg-transparent">
-                {headers.map((header) => (
+                <TableHead
+                  style={{ width: ROW_GUTTER_WIDTH }}
+                  className="sticky left-0 top-0 z-20 h-8 bg-card/95 px-2 text-center text-[10px] font-semibold text-muted-foreground backdrop-blur"
+                >
+                  <button
+                    type="button"
+                    onClick={() => onSelectionChange(emptySelection())}
+                    disabled={!selectionEnabled}
+                    className="h-5 w-5 rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-35"
+                    title="Clear selection"
+                    aria-label="Clear selection"
+                  >
+                    #
+                  </button>
+                </TableHead>
+
+                {headers.map((header, columnIndex) => (
                   <TableHead
                     key={header}
                     style={{ width: colWidths[header] || 150 }}
-                    className="relative sticky top-0 z-10 h-8 bg-card/95 backdrop-blur px-3 text-[11px] font-semibold text-muted-foreground truncate group"
+                    onMouseDown={(event) => startColumnSelection(event, columnIndex)}
+                    onMouseEnter={() => extendColumnSelection(columnIndex)}
+                    className={`relative sticky top-0 z-10 h-8 cursor-default bg-card/95 backdrop-blur px-3 text-[11px] font-semibold text-muted-foreground truncate group ${
+                      isColumnSelected(columnIndex) ? "data-grid-selected-header" : ""
+                    }`}
                   >
                     <div className={highlightedColumnSet.has(header) ? "column-highlight" : ""}>
                       <span className="relative z-10 block truncate">{header}</span>
                     </div>
                     <div
+                      data-resize-handle="true"
                       className="absolute top-0 right-0 w-1.5 h-full cursor-col-resize opacity-0 group-hover:opacity-100 hover:opacity-100 hover:bg-primary/50 transition-opacity"
                       onMouseDown={(event) => {
                         event.stopPropagation()
@@ -334,7 +600,7 @@ export function DataGrid({
             <TableBody>
               {virtualizedData.startIndex > 0 && (
                 <TableRow aria-hidden="true" className="hover:bg-transparent">
-                  <TableCell colSpan={Math.max(headers.length, 1)} className="p-0" style={{ height: virtualizedData.offsetTop }} />
+                  <TableCell colSpan={Math.max(headers.length + 1, 1)} className="p-0" style={{ height: virtualizedData.offsetTop }} />
                 </TableRow>
               )}
 
@@ -356,12 +622,26 @@ export function DataGrid({
                         : "hover:bg-accent/30"
                     }`}
                   >
-                    {headers.map((header) => (
+                    <TableCell
+                      style={{ width: ROW_GUTTER_WIDTH }}
+                      onMouseDown={(event) => startRowSelection(event, rowIndex)}
+                      onMouseEnter={() => extendRowSelection(rowIndex)}
+                      className={`sticky left-0 z-[5] h-7 cursor-default border-r border-border/60 bg-card/95 px-2 py-1.5 text-center text-[10px] font-medium text-muted-foreground backdrop-blur ${
+                        isRowSelected(rowIndex) ? "data-grid-selected-row-gutter" : ""
+                      }`}
+                    >
+                      {rowIndex + 1}
+                    </TableCell>
+
+                    {headers.map((header, columnIndex) => (
                       <TableCell
                         key={`${rowIndex}-${header}`}
+                        data-selected={isCellSelected(rowIndex, columnIndex) ? "true" : undefined}
+                        onMouseDown={(event) => startCellSelection(event, rowIndex, columnIndex)}
+                        onMouseEnter={() => extendCellSelection(rowIndex, columnIndex)}
                         className={`px-3 py-1.5 text-xs truncate ${
                           isHighlighted ? "text-foreground font-medium" : "text-foreground/80"
-                        }`}
+                        } ${isCellSelected(rowIndex, columnIndex) ? "data-grid-selected-cell" : ""}`}
                       >
                         {String(row[header] ?? "")}
                       </TableCell>
@@ -373,7 +653,7 @@ export function DataGrid({
               {virtualizedData.endIndex < tableRows.length && (
                 <TableRow aria-hidden="true" className="hover:bg-transparent">
                   <TableCell
-                    colSpan={Math.max(headers.length, 1)}
+                    colSpan={Math.max(headers.length + 1, 1)}
                     className="p-0"
                     style={{ height: (tableRows.length - virtualizedData.endIndex) * ROW_HEIGHT }}
                   />

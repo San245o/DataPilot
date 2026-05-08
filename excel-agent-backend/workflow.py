@@ -66,6 +66,12 @@ class AgentState(TypedDict, total=False):
     model: str
     history: list[dict[str, str]]
     thinking_mode: bool
+    active_dataset_id: str | None
+    selected_dataset_ids: list[str]
+    dataset_names: dict[str, str]
+    datasets: dict[str, dict[str, Any]]
+    selection_context: dict[str, Any] | None
+    dataset_contexts: list[dict[str, Any]]
     columns: list[str]
     dtypes: dict[str, str]
     nulls: dict[str, int]
@@ -85,6 +91,8 @@ class AgentState(TypedDict, total=False):
     table_request: dict[str, Any]
     query_table_rows: list[dict[str, Any]] | None
     query_tables: list[dict[str, Any]]
+    updated_datasets: list[dict[str, Any]]
+    created_datasets: list[dict[str, Any]]
     reasoning_steps: list[dict[str, str]]
     error: str | None
     retry_count: int
@@ -250,12 +258,127 @@ def _wants_separate_table(prompt: str) -> bool:
     return "[force_extract_table]" in p or any(k in p for k in _TABLE_INTENT_KW) or "pivot" in p or bool(re.search(r"\bextract\b", p))
 
 
+def _has_multi_dataset_output_intent(prompt: str) -> bool:
+    p = prompt.lower()
+    return any(
+        token in p
+        for token in (
+            "merge",
+            "join",
+            "combine",
+            "append",
+            "union",
+            "compare",
+            "lookup",
+            "match",
+            "consolidate",
+            "reconcile",
+            "difference",
+            "differences",
+            "pivot",
+            "top",
+            "rank",
+            "list",
+            "visualize",
+            "visualise",
+            "chart",
+            "plot",
+        )
+    )
+
+
+def _derive_output_dataset_name(prompt: str, selected_names: list[str]) -> str:
+    p = prompt.lower()
+    if "compare" in p or "difference" in p or "differences" in p:
+        base = "Comparison Result"
+    elif "append" in p or "union" in p or "consolidate" in p:
+        base = "Consolidated Result"
+    elif "lookup" in p or "match" in p:
+        base = "Lookup Result"
+    else:
+        base = "Merged Result"
+
+    if selected_names:
+        compact = " + ".join(name[:24] for name in selected_names[:2])
+        return f"{base} ({compact})"
+    return base
+
+
 def _rows_from_highlights(rows: list[dict[str, Any]], highlight_indices: list[int]) -> list[dict[str, Any]]:
     extracted_rows: list[dict[str, Any]] = []
     for index in highlight_indices:
         if 0 <= index < len(rows):
             extracted_rows.append(rows[index])
     return extracted_rows
+
+
+def _build_table_context(rows: list[dict[str, Any]], *, include_samples: bool, name: str | None = None, dataset_id: str | None = None) -> dict[str, Any]:
+    columns = list(rows[0].keys()) if rows else []
+    dtypes: dict[str, str] = {}
+    sample_for_types = rows[:100]
+    for col in columns:
+        vals = [r.get(col) for r in sample_for_types if r.get(col) is not None and r.get(col) != ""]
+        if not vals:
+            dtypes[col] = "unknown"
+        elif all(isinstance(v, bool) for v in vals):
+            dtypes[col] = "bool"
+        elif all(isinstance(v, int) for v in vals):
+            dtypes[col] = "int"
+        elif all(isinstance(v, (int, float)) for v in vals):
+            dtypes[col] = "float"
+        else:
+            dtypes[col] = "str"
+
+    nulls: dict[str, int] = {}
+    for col in columns:
+        ct = sum(1 for r in rows if r.get(col) is None or r.get(col) == "")
+        if ct > 0:
+            nulls[col] = ct
+
+    value_ranges: dict[str, dict] = {}
+    numeric_cols = [c for c in columns if dtypes.get(c) in ("int", "float")][:8]
+    for col in numeric_cols:
+        nums = []
+        for r in rows:
+            v = r.get(col)
+            if v is not None and v != "":
+                try:
+                    nums.append(float(v))
+                except (ValueError, TypeError):
+                    pass
+        if nums:
+            value_ranges[col] = {
+                "min": round(min(nums), 2),
+                "max": round(max(nums), 2),
+                "mean": round(sum(nums) / len(nums), 2),
+            }
+
+    top_categories: dict[str, list] = {}
+    str_cols = [c for c in columns if dtypes.get(c) == "str"][:8]
+    for col in str_cols:
+        vals = [r.get(col) for r in rows if r.get(col) is not None and r.get(col) != ""]
+        uniq = set(vals)
+        if 0 < len(uniq) < 25:
+            from collections import Counter
+            top_categories[col] = [item for item, _ in Counter(vals).most_common(5)]
+
+    sample_rows: list[dict[str, Any]] = []
+    if include_samples and rows:
+        sampled = random.sample(rows, min(3, len(rows)))
+        sample_rows = [{k: _truncate_cell(v) for k, v in row.items()} for row in sampled]
+
+    return {
+        "dataset_id": dataset_id,
+        "name": name or dataset_id or "Dataset",
+        "row_count": len(rows),
+        "column_count": len(columns),
+        "columns": columns,
+        "dtypes": dtypes,
+        "nulls": nulls,
+        "value_ranges": value_ranges,
+        "top_categories": top_categories,
+        "sample_rows": sample_rows,
+    }
 
 
 def _extract_prompt_columns(prompt: str, columns: list[str]) -> list[str]:
@@ -310,73 +433,37 @@ def _derive_highlighted_columns(
 def _prepare_context(state: AgentState) -> AgentState:
     try:
         rows = state.get("rows") or []
-        columns = list(rows[0].keys()) if rows else []
         history = state.get("history") or []
         prompt = state.get("prompt") or ""
         is_mutation_only = _is_mutation_only(prompt)
+        active_dataset_id = state.get("active_dataset_id")
+        dataset_names = state.get("dataset_names") or {}
+        active_name = dataset_names.get(active_dataset_id or "") if active_dataset_id else "Active Dataset"
+        active_context = _build_table_context(
+            rows,
+            include_samples=len(history) == 0,
+            name=active_name or "Active Dataset",
+            dataset_id=active_dataset_id,
+        )
+        columns = active_context["columns"]
+        dtypes = active_context["dtypes"]
+        nulls = active_context["nulls"]
+        value_ranges = {} if is_mutation_only else active_context["value_ranges"]
+        top_categories = {} if is_mutation_only else active_context["top_categories"]
+        sample_rows = active_context["sample_rows"]
 
-        # Compute dtypes from sample
-        dtypes: dict[str, str] = {}
-        sample_for_types = rows[:100]
-        for col in columns:
-            vals = [r.get(col) for r in sample_for_types if r.get(col) is not None and r.get(col) != ""]
-            if not vals:
-                dtypes[col] = "unknown"
-            elif all(isinstance(v, bool) for v in vals):
-                dtypes[col] = "bool"
-            elif all(isinstance(v, int) for v in vals):
-                dtypes[col] = "int"
-            elif all(isinstance(v, (int, float)) for v in vals):
-                dtypes[col] = "float"
-            else:
-                dtypes[col] = "str"
-
-        # Compute null counts (only include non-zero)
-        nulls: dict[str, int] = {}
-        for col in columns:
-            ct = sum(1 for r in rows if r.get(col) is None or r.get(col) == "")
-            if ct > 0:
-                nulls[col] = ct
-
-        # Compute metadata for non-pure-mutations
-        value_ranges: dict[str, dict] = {}
-        top_categories: dict[str, list] = {}
-
-        if not is_mutation_only:
-            # Value ranges for numeric columns (limit to 12)
-            numeric_cols = [c for c in columns if dtypes.get(c) in ("int", "float")][:12]
-            for col in numeric_cols:
-                nums = []
-                for r in rows:
-                    v = r.get(col)
-                    if v is not None and v != "":
-                        try:
-                            nums.append(float(v))
-                        except (ValueError, TypeError):
-                            pass
-                if nums:
-                    value_ranges[col] = {
-                        "min": round(min(nums), 2),
-                        "max": round(max(nums), 2),
-                        "mean": round(sum(nums) / len(nums), 2),
-                    }
-
-            # Top categories for string columns with <25 unique values (limit to 10 cols)
-            str_cols = [c for c in columns if dtypes.get(c) == "str"][:10]
-            for col in str_cols:
-                vals = [r.get(col) for r in rows if r.get(col) is not None and r.get(col) != ""]
-                uniq = set(vals)
-                if 0 < len(uniq) < 25:
-                    from collections import Counter
-                    top_5 = [item for item, _ in Counter(vals).most_common(5)]
-                    top_categories[col] = top_5
-
-        # Sample rows: only on first turn (no history), 3 rows, truncated cells
-        sample_rows: list[dict[str, Any]] = []
-        if len(history) == 0 and rows:
-            n = min(3, len(rows))
-            sampled = random.sample(rows, n)
-            sample_rows = [{k: _truncate_cell(v) for k, v in row.items()} for row in sampled]
+        dataset_contexts: list[dict[str, Any]] = []
+        datasets = state.get("datasets") or {}
+        for dataset_id, dataset in datasets.items():
+            dataset_rows = dataset.get("rows") or []
+            dataset_contexts.append(
+                _build_table_context(
+                    dataset_rows,
+                    include_samples=len(history) == 0,
+                    name=dataset.get("name") or dataset_names.get(dataset_id) or dataset_id,
+                    dataset_id=dataset_id,
+                )
+            )
 
         return {
             "columns": columns,
@@ -385,6 +472,7 @@ def _prepare_context(state: AgentState) -> AgentState:
             "value_ranges": value_ranges,
             "top_categories": top_categories,
             "sample_rows": sample_rows,
+            "dataset_contexts": dataset_contexts,
             "reasoning_steps": [],
             "retry_count": 0,
             "error": None,
@@ -397,6 +485,7 @@ def _prepare_context(state: AgentState) -> AgentState:
             "value_ranges": {},
             "top_categories": {},
             "sample_rows": [],
+            "dataset_contexts": [],
             "reasoning_steps": [],
             "retry_count": 0,
             "error": f"Context preparation failed: {e}",
@@ -434,6 +523,8 @@ def _generate_code(state: AgentState) -> AgentState:
             value_ranges=state.get("value_ranges") or {},
             top_categories=state.get("top_categories") or {},
             sample_rows=state.get("sample_rows") or [],
+            dataset_contexts=state.get("dataset_contexts") or [],
+            selection_context=state.get("selection_context"),
             history=state.get("history") or [],
             thinking_mode=bool(state.get("thinking_mode")),
         )
@@ -501,7 +592,13 @@ def _execute_code(state: AgentState) -> AgentState:
 
     try:
         rows = state.get("rows") or []
-        result = run_sandboxed(code, rows)
+        result = run_sandboxed(
+            code,
+            rows,
+            datasets=state.get("datasets") or {},
+            active_dataset_id=state.get("active_dataset_id"),
+            selection_context=state.get("selection_context"),
+        )
         table_request = state.get("table_request") or {"enabled": False, "title": "Query Table"}
         table_enabled = bool(table_request.get("enabled", False))
         table_title = str(table_request.get("title") or "Query Table").strip() or "Query Table"
@@ -511,6 +608,13 @@ def _execute_code(state: AgentState) -> AgentState:
         has_mutation_intent = _has_mutation_intent(prompt)
         has_inplace_cleaning_signal = _has_inplace_cleaning_signal(code)
         row_growth = len(result.rows) > len(rows)
+        selected_dataset_ids = [
+            dataset_id
+            for dataset_id in [state.get("active_dataset_id"), *(state.get("selected_dataset_ids") or [])]
+            if dataset_id
+        ]
+        unique_selected_ids = list(dict.fromkeys(selected_dataset_ids))
+        is_multi_dataset_output = len(unique_selected_ids) > 1 and _has_multi_dataset_output_intent(prompt)
         is_mutation_action = (
             action_type in ("mutation", "combined")
             or has_mutation_intent
@@ -519,8 +623,33 @@ def _execute_code(state: AgentState) -> AgentState:
         )
         row_deletion_blocked = len(result.rows) < len(rows) and not _allows_row_deletion(prompt)
 
-        mutation_applied = bool(result.mutation and is_mutation_action and not row_deletion_blocked)
+        mutation_applied = bool(result.mutation and is_mutation_action and not row_deletion_blocked and not is_multi_dataset_output)
+        created_datasets: list[dict[str, Any]] = []
+        updated_datasets: list[dict[str, Any]] = []
+        dataset_names = state.get("dataset_names") or {}
+        active_dataset_id = state.get("active_dataset_id")
         final_rows = result.rows if mutation_applied else rows
+
+        if is_multi_dataset_output and result.rows:
+            selected_names = [dataset_names.get(dataset_id, dataset_id) for dataset_id in unique_selected_ids]
+            created_datasets.append({
+                "id": uuid4().hex,
+                "dataset_id": uuid4().hex,
+                "name": _derive_output_dataset_name(prompt, selected_names),
+                "rows": result.rows,
+                "kind": "derived",
+                "source_dataset_ids": unique_selected_ids,
+                "modified": True,
+            })
+        elif mutation_applied and active_dataset_id:
+            updated_datasets.append({
+                "dataset_id": active_dataset_id,
+                "name": dataset_names.get(active_dataset_id, active_dataset_id),
+                "rows": final_rows,
+                "kind": "uploaded",
+                "source_dataset_ids": [],
+                "modified": True,
+            })
 
         query_output = result.query_output
         if row_deletion_blocked:
@@ -561,6 +690,9 @@ def _execute_code(state: AgentState) -> AgentState:
             "mutation": mutation_applied,
             "highlight_indices": result.highlight_indices,
             "highlighted_columns": highlighted_columns,
+            "active_dataset_id": active_dataset_id,
+            "updated_datasets": updated_datasets,
+            "created_datasets": created_datasets,
             "error": None,
         }
         if state.get("thinking_mode"):
@@ -627,6 +759,7 @@ def _fix_code(state: AgentState) -> AgentState:
             dtypes=state.get("dtypes") or {},
             original_code=state.get("code") or "",
             error_message=state.get("error") or "Unknown error",
+            selection_context=state.get("selection_context"),
             thinking_mode=bool(state.get("thinking_mode")),
         )
 

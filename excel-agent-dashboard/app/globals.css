@@ -283,6 +283,74 @@ html, body {
   animation: swipe 1.5s ease-in-out forwards;
 }
 
+.chat-rollback-bubble {
+  position: relative;
+  overflow: hidden;
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--primary) 44%, transparent),
+    0 12px 28px -26px color-mix(in oklab, var(--primary) 64%, black 36%);
+}
+
+.chat-rollback-bubble::after {
+  content: "";
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    100deg,
+    transparent 0%,
+    color-mix(in oklab, var(--primary) 18%, transparent) 36%,
+    color-mix(in oklab, var(--primary) 42%, white 12%) 50%,
+    color-mix(in oklab, var(--primary) 18%, transparent) 64%,
+    transparent 100%
+  );
+  transform: translateX(-120%);
+  animation: chat-rollback-swipe 1.35s ease-in-out 1;
+}
+
+@keyframes chat-rollback-swipe {
+  0% {
+    opacity: 0;
+    transform: translateX(-120%);
+  }
+  18% {
+    opacity: 1;
+  }
+  82% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(120%);
+  }
+}
+
+.data-grid-selected-cell,
+td[data-selected="true"] {
+  color: var(--foreground) !important;
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in oklab, var(--primary) 18%, transparent),
+      color-mix(in oklab, var(--primary) 12%, transparent)
+    ) !important;
+  box-shadow: inset 0 1px 0 color-mix(in oklab, var(--primary) 18%, transparent);
+}
+
+.data-grid-selected-header,
+.data-grid-selected-row-gutter {
+  color: var(--foreground) !important;
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in oklab, var(--primary) 32%, var(--card)),
+      color-mix(in oklab, var(--primary) 22%, var(--card))
+    ) !important;
+  box-shadow:
+    inset 0 0 0 1px color-mix(in oklab, var(--primary) 34%, transparent),
+    inset 0 -2px 0 color-mix(in oklab, var(--primary) 42%, transparent);
+}
+
 :root {
   --menu-ease: cubic-bezier(0.22, 1, 0.36, 1);
   --menu-duration: 220ms;
@@ -341,13 +409,39 @@ html, body {
   transform: translateY(6px) scale(0.965);
 }
 
+.prompt-token {
+  display: inline;
+  font: inherit;
+  line-height: inherit;
+  padding: 0;
+  text-decoration-line: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.18em;
+}
+
+.prompt-token-file {
+  color: color-mix(in oklab, var(--primary) 86%, white 14%);
+  text-decoration-color: color-mix(in oklab, var(--primary) 72%, transparent);
+}
+
+.prompt-token-command {
+  color: color-mix(in oklab, var(--foreground) 74%, var(--primary));
+  text-decoration-color: color-mix(in oklab, var(--foreground) 48%, transparent);
+  text-decoration-style: dotted;
+}
+
+.prompt-message-bubble .prompt-token {
+  color: inherit;
+  text-decoration-color: rgb(255 255 255 / 0.55);
+}
+
 .thinking-flow {
   color: transparent;
   background-image: linear-gradient(
     90deg,
     color-mix(in oklab, var(--muted-foreground) 55%, transparent) 0%,
     color-mix(in oklab, var(--muted-foreground) 85%, transparent) 28%,
-    color-mix(in oklab, var(--primary) 92%, white 8%) 50%,
+    color-mix(in oklab, var(--foreground) 92%, white 8%) 50%,
     color-mix(in oklab, var(--muted-foreground) 85%, transparent) 72%,
     color-mix(in oklab, var(--muted-foreground) 55%, transparent) 100%
   );

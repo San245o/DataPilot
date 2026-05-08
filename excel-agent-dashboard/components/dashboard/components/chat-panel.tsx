@@ -1,32 +1,40 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
-import { BrainCircuit, ChevronDown, Code, Loader2, Send, X } from "lucide-react"
+import { BrainCircuit, ChevronDown, Code, Loader2, Plus, Send, Square, Table2, X } from "lucide-react"
 
 import {
-  getActiveSlashQuery,
   SLASH_COMMANDS,
   SLASH_DESCRIPTION_DELAY_MS,
   SLASH_ROW_GAP,
   SLASH_ROW_HEIGHT,
   type ChatMessage,
+  type DataSelectionContext,
   type SlashCommandOption,
   type ThinkingTraceEntry,
+  type WorkspaceDataset,
 } from "@/components/dashboard/dashboard-shared"
 
 type ChatPanelProps = {
   width: number
   chatMessages: ChatMessage[]
+  highlightedMessageIndex: number | null
+  pendingSelectionContext: DataSelectionContext | null
+  attachedSelectionContext: DataSelectionContext | null
   prompt: string
   isRunning: boolean
   error: string | null
   thinkingMode: boolean
   modelLabel: string
+  datasets: WorkspaceDataset[]
   onPromptChange: (value: string) => void
   onSubmit: () => void
+  onCancel: () => void
   onToggleThinkingMode: () => void
   onClearError: () => void
   onOpenTableLink: (tableId: string) => void
+  onAttachSelection: () => void
+  onClearSelection: () => void
 }
 
 function renderSimpleMarkdown(text: string) {
@@ -140,55 +148,218 @@ function shouldHideObservationLead(entry: ThinkingTraceEntry) {
   return /^(Returned \d+ (rows|items)|Found \d+ matching rows\.|The tool returned )/i.test(entry.content.trim())
 }
 
+function selectionTypeLabel(selection: DataSelectionContext) {
+  if (selection.selection_type === "rows") return "Rows"
+  if (selection.selection_type === "columns") return "Columns"
+  if (selection.selection_type === "cells") return "Cells"
+  return "Mixed"
+}
+
+type ActivePromptTrigger = {
+  query: string
+  start: number
+  end: number
+}
+
+type MentionToken = {
+  token: string
+  label: string
+  kind: "file" | "command"
+}
+
+function getActivePromptTrigger(text: string, cursor: number, trigger: "/" | "@"): ActivePromptTrigger | null {
+  const safeCursor = Math.max(0, Math.min(cursor, text.length))
+  let start = safeCursor
+  let end = safeCursor
+
+  while (start > 0 && !/\s/.test(text[start - 1])) {
+    start -= 1
+  }
+
+  while (end < text.length && !/\s/.test(text[end])) {
+    end += 1
+  }
+
+  if (start >= end || text[start] !== trigger || safeCursor <= start) return null
+
+  const query = text.slice(start + 1, safeCursor).toLowerCase()
+  if (query.includes(trigger)) return null
+
+  return { query, start, end }
+}
+
+function getDatasetMentionTokens(datasets: WorkspaceDataset[]) {
+  const seen = new Set<string>()
+  const tokens: MentionToken[] = []
+
+  datasets.forEach((dataset) => {
+    ;[dataset.displayName, dataset.fileName].forEach((name) => {
+      if (!name) return
+      const token = `@${name}`
+      const key = token.toLowerCase()
+      if (seen.has(key)) return
+      seen.add(key)
+      tokens.push({ token, label: token, kind: "file" })
+    })
+  })
+
+  return tokens.sort((a, b) => b.token.length - a.token.length)
+}
+
+function startsWithIgnoreCase(text: string, index: number, token: string) {
+  return text.slice(index, index + token.length).toLowerCase() === token.toLowerCase()
+}
+
+function isTokenStart(text: string, index: number) {
+  return index === 0 || /\s/.test(text[index - 1])
+}
+
+function isTokenEnd(text: string, index: number) {
+  return index >= text.length || /[\s.,;:!?]/.test(text[index])
+}
+
+function renderPromptTokens(text: string, datasets: WorkspaceDataset[], surface: "editor" | "message") {
+  const datasetTokens = getDatasetMentionTokens(datasets)
+  const nodes: ReactNode[] = []
+  let index = 0
+  let plainStart = 0
+  let keyIndex = 0
+
+  const flushPlain = (end: number) => {
+    if (end > plainStart) {
+      nodes.push(text.slice(plainStart, end))
+    }
+  }
+
+  const pushToken = (token: MentionToken, rawToken = token.token) => {
+    flushPlain(index)
+    const label = surface === "message" ? token.label : rawToken
+    nodes.push(
+      <span key={`${token.kind}-${keyIndex}`} className={`prompt-token prompt-token-${token.kind}`}>
+        {label}
+      </span>
+    )
+    keyIndex += 1
+    index += rawToken.length
+    plainStart = index
+  }
+
+  while (index < text.length) {
+    const markdownFileMatch = text.slice(index).match(/^\[([^\]\n]+)\]\(([^\)\n]+)\)/)
+    if (markdownFileMatch) {
+      pushToken({ token: markdownFileMatch[0], label: markdownFileMatch[1], kind: "file" }, markdownFileMatch[0])
+      continue
+    }
+
+    if (isTokenStart(text, index) && text[index] === "@") {
+      const datasetToken = datasetTokens.find(
+        (candidate) =>
+          startsWithIgnoreCase(text, index, candidate.token) &&
+          isTokenEnd(text, index + candidate.token.length)
+      )
+      if (datasetToken) {
+        pushToken(datasetToken, text.slice(index, index + datasetToken.token.length))
+        continue
+      }
+    }
+
+    if (isTokenStart(text, index) && text[index] === "/") {
+      const commandMatch = text.slice(index).match(/^\/[^\s]*/)
+      const commandToken = commandMatch?.[0] ?? ""
+      const comparableCommand = commandToken.toLowerCase().replace(/[.,;:!?]+$/, "")
+      if (
+        comparableCommand.length > 1 &&
+        SLASH_COMMANDS.some((item) => item.command.startsWith(comparableCommand) || comparableCommand.startsWith(item.command))
+      ) {
+        pushToken({ token: commandToken, label: commandToken, kind: "command" }, commandToken)
+        continue
+      }
+    }
+
+    index += 1
+  }
+
+  flushPlain(text.length)
+  if (text.endsWith("\n")) {
+    nodes.push(<br key="final-line-break" />)
+  }
+
+  return nodes
+}
+
 export function ChatPanel({
   width,
   chatMessages,
+  highlightedMessageIndex,
+  pendingSelectionContext,
+  attachedSelectionContext,
   prompt,
   isRunning,
   error,
   thinkingMode,
   modelLabel,
+  datasets,
   onPromptChange,
   onSubmit,
+  onCancel,
   onToggleThinkingMode,
   onClearError,
   onOpenTableLink,
+  onAttachSelection,
+  onClearSelection,
 }: ChatPanelProps) {
   const [expandedCodeIndex, setExpandedCodeIndex] = useState<number | null>(null)
   const [transcriptVisibilityOverrides, setTranscriptVisibilityOverrides] = useState<Record<number, boolean>>({})
   const [selectedSlashIndex, setSelectedSlashIndex] = useState(0)
+  const [selectedDatasetIndex, setSelectedDatasetIndex] = useState(0)
   const [slashDismissed, setSlashDismissed] = useState(false)
+  const [datasetMenuDismissed, setDatasetMenuDismissed] = useState(false)
   const [visibleSlashDescriptionFor, setVisibleSlashDescriptionFor] = useState<string | null>(null)
+  const [promptCursor, setPromptCursor] = useState(prompt.length)
 
   const chatEndRef = useRef<HTMLDivElement | null>(null)
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null)
   const slashListRef = useRef<HTMLDivElement | null>(null)
+  const messageRefs = useRef<Array<HTMLDivElement | null>>([])
   const slashDescriptionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const slashQuery = useMemo(() => getActiveSlashQuery(prompt), [prompt])
+  const activeSlashTrigger = useMemo(() => getActivePromptTrigger(prompt, promptCursor, "/"), [prompt, promptCursor])
+  const activeDatasetTrigger = useMemo(() => getActivePromptTrigger(prompt, promptCursor, "@"), [prompt, promptCursor])
+  const slashQuery = activeSlashTrigger?.query ?? null
+  const datasetQuery = activeDatasetTrigger?.query ?? null
   const filteredSlashCommands = useMemo(() => {
     if (slashQuery === null) return []
     if (!slashQuery) return SLASH_COMMANDS
     return SLASH_COMMANDS.filter((item) => item.command.slice(1).startsWith(slashQuery))
   }, [slashQuery])
   const showSlashMenu = slashQuery !== null && !slashDismissed && filteredSlashCommands.length > 0
+  const filteredDatasets = useMemo(() => {
+    if (datasetQuery === null) return []
+    return datasets.filter((dataset) =>
+      [dataset.displayName, dataset.fileName].some((name) => name.toLowerCase().includes(datasetQuery))
+    )
+  }, [datasetQuery, datasets])
+  const showDatasetMenu = datasetQuery !== null && !datasetMenuDismissed && filteredDatasets.length > 0
   const activeSlashIndex = showSlashMenu
     ? Math.min(selectedSlashIndex, filteredSlashCommands.length - 1)
     : 0
+  const activeDatasetIndex = showDatasetMenu
+    ? Math.min(selectedDatasetIndex, filteredDatasets.length - 1)
+    : 0
   const activeDescription = showSlashMenu ? visibleSlashDescriptionFor : null
-  const liveTranscriptIndex = useMemo(() => {
-    for (let index = chatMessages.length - 1; index >= 0; index -= 1) {
-      const message = chatMessages[index]
-      if (message?.role === "assistant" && message.isStreaming) {
-        return index
-      }
-    }
-    return -1
-  }, [chatMessages])
+
+  useEffect(() => {
+    setPromptCursor((prev) => Math.min(prev, prompt.length))
+  }, [prompt.length])
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" })
   }, [chatMessages, isRunning])
+
+  useEffect(() => {
+    if (highlightedMessageIndex === null) return
+    messageRefs.current[highlightedMessageIndex]?.scrollIntoView({ behavior: "smooth", block: "center" })
+  }, [highlightedMessageIndex])
 
   const clearSlashDescriptionTimer = useCallback(() => {
     if (!slashDescriptionTimerRef.current) return
@@ -214,9 +385,18 @@ export function ChatPanel({
     return () => clearSlashDescriptionTimer()
   }, [clearSlashDescriptionTimer])
 
+  const updatePromptCursor = useCallback((input = promptInputRef.current) => {
+    if (!input) return
+    setPromptCursor(input.selectionStart ?? input.value.length)
+  }, [])
+
   const insertSlashCommand = useCallback((item: SlashCommandOption) => {
-    const nextValue = `${item.command} `
+    if (!activeSlashTrigger) return
+
+    const nextValue = `${prompt.slice(0, activeSlashTrigger.start)}${item.command} ${prompt.slice(activeSlashTrigger.end)}`
+    const nextCursor = activeSlashTrigger.start + item.command.length + 1
     onPromptChange(nextValue)
+    setPromptCursor(nextCursor)
     setSlashDismissed(false)
     setSelectedSlashIndex(0)
     setVisibleSlashDescriptionFor(null)
@@ -226,9 +406,27 @@ export function ChatPanel({
       const input = promptInputRef.current
       if (!input) return
       input.focus()
-      input.setSelectionRange(nextValue.length, nextValue.length)
+      input.setSelectionRange(nextCursor, nextCursor)
     })
-  }, [clearSlashDescriptionTimer, onPromptChange])
+  }, [activeSlashTrigger, clearSlashDescriptionTimer, onPromptChange, prompt])
+
+  const insertDatasetMention = useCallback((dataset: WorkspaceDataset) => {
+    if (!activeDatasetTrigger) return
+
+    const nextValue = `${prompt.slice(0, activeDatasetTrigger.start)}@${dataset.displayName} ${prompt.slice(activeDatasetTrigger.end)}`
+    const nextCursor = activeDatasetTrigger.start + dataset.displayName.length + 2
+    onPromptChange(nextValue)
+    setPromptCursor(nextCursor)
+    setDatasetMenuDismissed(false)
+    setSelectedDatasetIndex(0)
+
+    requestAnimationFrame(() => {
+      const input = promptInputRef.current
+      if (!input) return
+      input.focus()
+      input.setSelectionRange(nextCursor, nextCursor)
+    })
+  }, [activeDatasetTrigger, onPromptChange, prompt])
 
   const toggleTranscript = useCallback((index: number, nextOpen: boolean) => {
     setTranscriptVisibilityOverrides((prev) => ({
@@ -243,29 +441,33 @@ export function ChatPanel({
         {chatMessages.map((message, index) => (
           (() => {
             const messageThinkingTrace = Array.isArray(message.thinkingTrace) ? message.thinkingTrace : []
-            const defaultTranscriptOpen = Boolean(message.isStreaming) && index === liveTranscriptIndex
+            const defaultTranscriptOpen = false
             const isTranscriptOpen = transcriptVisibilityOverrides[index] ?? defaultTranscriptOpen
+            const isRollbackHighlight = highlightedMessageIndex === index
 
             return (
               <div
                 key={`${message.role}-${index}`}
+                ref={(node) => {
+                  messageRefs.current[index] = node
+                }}
                 className={`group flex flex-col ${message.role === "user" ? "items-end" : "items-start"}`}
               >
                 {message.role === "assistant" &&
                   (messageThinkingTrace.length > 0 || Boolean(message.isStreaming)) && (
-                <div className="mb-2 w-full max-w-[90%]">
+                <div className="mb-1 w-full max-w-[90%]">
                   <button
                     type="button"
                     onClick={() => toggleTranscript(index, !isTranscriptOpen)}
                     aria-expanded={isTranscriptOpen}
-                    className={`flex items-center gap-1.5 rounded-md px-2 py-1 text-[10px] font-medium transition-colors ${
+                    className={`flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[10px] font-medium transition-colors ${
                       isTranscriptOpen
                         ? "bg-primary/10 text-primary"
                         : "text-muted-foreground hover:bg-accent hover:text-foreground"
                     }`}
                   >
                     <BrainCircuit className="size-3" />
-                    {isTranscriptOpen ? "Hide thinking" : "Show thinking"}
+                    {message.isStreaming ? "Working" : "Details"}
                     <ChevronDown className={`size-3 transition-transform ${isTranscriptOpen ? "rotate-180" : ""}`} />
                   </button>
 
@@ -338,17 +540,21 @@ export function ChatPanel({
                 )}
 
                 {message.role === "user" ? (
-                  <div className="max-w-[90%] rounded-xl bg-primary px-3 py-2 text-[13px] leading-relaxed text-primary-foreground">
-                    {message.content}
+                  <div className={`prompt-message-bubble max-w-[90%] rounded-xl bg-primary px-3 py-2 text-[13px] leading-relaxed text-primary-foreground ${isRollbackHighlight ? "chat-rollback-bubble" : ""}`}>
+                    {renderPromptTokens(message.content, datasets, "message")}
                   </div>
                 ) : (
-                  index === chatMessages.length - 1 ? (
-                    <AssistantText key={message.content} text={message.content} />
-                  ) : (
-                    <div className="max-w-[90%] px-1 py-1 text-[13px] leading-relaxed text-foreground/92">
-                      {renderSimpleMarkdown(message.content)}
-                    </div>
-                  )
+                  message.content ? (
+                    index === chatMessages.length - 1 ? (
+                      <div className={isRollbackHighlight ? "chat-rollback-bubble rounded-xl" : ""}>
+                        <AssistantText key={message.content} text={message.content} />
+                      </div>
+                    ) : (
+                      <div className={`max-w-[90%] px-1 py-1 text-[13px] leading-relaxed text-foreground/92 ${isRollbackHighlight ? "chat-rollback-bubble rounded-xl" : ""}`}>
+                        {renderSimpleMarkdown(message.content)}
+                      </div>
+                    )
+                  ) : null
                 )}
 
                 {message.role === "assistant" &&
@@ -400,14 +606,6 @@ export function ChatPanel({
           })()
         ))}
 
-        {isRunning && (
-          <div className="flex items-start px-1 py-1 text-[13px] leading-relaxed text-muted-foreground">
-            <span className="thinking-flow inline-block font-medium">
-              {thinkingMode ? "Thinking through tools and sandbox steps" : "Thinking"}
-            </span>
-          </div>
-        )}
-
         <div ref={chatEndRef} />
       </div>
 
@@ -425,11 +623,103 @@ export function ChatPanel({
       )}
 
       <div className="border-t border-border p-3">
+        {(pendingSelectionContext || attachedSelectionContext) && (
+          <div className="mb-2 flex flex-wrap gap-1.5">
+            {attachedSelectionContext ? (
+              <div className="group/selection-chip inline-flex max-w-full items-center gap-2 rounded-md border border-primary/35 bg-primary/10 px-2.5 py-1.5 text-left text-[11px] font-medium text-foreground shadow-sm">
+                <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded bg-primary/15 text-primary">
+                  <Table2 className="size-3.5" />
+                </span>
+                <span className="min-w-0">
+                  <span className="block truncate text-primary">{selectionTypeLabel(attachedSelectionContext)} selected</span>
+                  <span className="block truncate text-[10px] text-muted-foreground">
+                    {attachedSelectionContext.summary} · {attachedSelectionContext.dataset_name}
+                    {attachedSelectionContext.compact ? " · compact" : ""}
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  onClick={onClearSelection}
+                  className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+                  title="Clear selection"
+                  aria-label="Clear selection"
+                >
+                  <X className="size-3.5" />
+                </button>
+              </div>
+            ) : pendingSelectionContext ? (
+              <div className="inline-flex max-w-full items-center rounded-md border border-border bg-secondary text-[11px] font-medium text-foreground shadow-sm transition-colors hover:border-primary/35">
+                <button
+                  type="button"
+                  onClick={onAttachSelection}
+                  className="inline-flex min-w-0 items-center gap-2 px-2.5 py-1.5 text-left transition-colors hover:bg-accent"
+                  title="Attach selected range to this prompt"
+                >
+                  <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded bg-card text-muted-foreground">
+                    <Plus className="size-3.5" />
+                  </span>
+                  <span className="min-w-0">
+                    <span className="block truncate">Add selected range</span>
+                    <span className="block truncate text-[10px] text-muted-foreground">
+                      {pendingSelectionContext.summary} · {pendingSelectionContext.dataset_name}
+                    </span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={onClearSelection}
+                  className="mr-1 flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+                  title="Clear selection"
+                  aria-label="Clear selection"
+                >
+                  <X className="size-3.5" />
+                </button>
+              </div>
+            ) : null}
+          </div>
+        )}
+
         <div className="relative">
+          <div
+            data-state={showDatasetMenu ? "open" : "closed"}
+            data-side="top"
+            className="menu-surface menu-popover absolute bottom-full left-0 right-0 mb-2 rounded-lg p-2 shadow-md"
+          >
+            <div className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+              Datasets
+            </div>
+            <div className="max-h-56 overflow-y-auto scrollbar-thin pr-1">
+              <div className="space-y-1">
+                {filteredDatasets.map((dataset, index) => {
+                  const isActive = index === activeDatasetIndex
+                  return (
+                    <button
+                      key={dataset.id}
+                      type="button"
+                      onMouseDown={(event) => {
+                        event.preventDefault()
+                        insertDatasetMention(dataset)
+                      }}
+                      onMouseEnter={() => setSelectedDatasetIndex(index)}
+                      className={`flex h-8 w-full items-center justify-between gap-2 rounded-md px-2.5 text-left text-[12px] font-medium leading-none transition-colors ${
+                        isActive ? "bg-primary/12 text-foreground" : "text-muted-foreground hover:text-foreground hover:bg-accent"
+                      }`}
+                    >
+                      <span className="truncate">{dataset.displayName}</span>
+                      <span className="shrink-0 text-[10px] text-muted-foreground">
+                        {dataset.rowCount}x{dataset.columnCount}
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          </div>
+
           <div
             data-state={showSlashMenu ? "open" : "closed"}
             data-side="top"
-            className="menu-surface menu-popover absolute bottom-full left-0 right-11 mb-2 rounded-lg p-2 shadow-md"
+            className="menu-surface menu-popover absolute bottom-full left-0 right-0 mb-2 rounded-lg p-2 shadow-md"
           >
               <div className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground space-y-1">
                 Commands
@@ -482,106 +772,166 @@ export function ChatPanel({
               </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            <textarea
-              ref={promptInputRef}
-              className="flex-1 resize-none rounded-lg border border-border bg-secondary px-3 py-2 text-sm text-foreground outline-none transition placeholder:text-muted-foreground focus:ring-1 focus:ring-ring"
-              placeholder={thinkingMode ? "Ask something... ReAct thinking will be shown after completion." : "Ask something... (type / for commands)"}
-              rows={2}
-              value={prompt}
-              onChange={(event) => {
-                onPromptChange(event.target.value)
-                setSlashDismissed(false)
-                if (!event.target.value.trimStart().startsWith("/")) {
-                  hideSlashDescription()
-                }
-              }}
-              onKeyDown={(event) => {
-                if (showSlashMenu) {
-                  const scrollSlashOptionIntoView = (index: number) => {
-                    const container = slashListRef.current
-                    if (!container) return
-                    const options = container.querySelectorAll<HTMLElement>("button[data-slash-option]")
-                    options[index]?.scrollIntoView({ block: "nearest" })
-                  }
+          <div className="rounded-xl border border-border bg-secondary/70 shadow-sm transition focus-within:border-ring/70 focus-within:ring-2 focus-within:ring-ring/15">
+            <div className="relative min-h-20">
+              <textarea
+                ref={promptInputRef}
+                className="relative block max-h-56 min-h-20 w-full resize-y rounded-t-xl bg-transparent px-3 py-2.5 text-sm leading-relaxed text-foreground outline-none placeholder:text-muted-foreground"
+                aria-label="Ask DataPilot"
+                placeholder="Ask DataPilot... Use @ to attach datasets or / for commands."
+                rows={3}
+                spellCheck={false}
+                value={prompt}
+                onChange={(event) => {
+                  const nextValue = event.currentTarget.value
+                  const nextCursor = event.currentTarget.selectionStart ?? nextValue.length
 
-                  if (event.key === "ArrowDown") {
-                    event.preventDefault()
+                  onPromptChange(nextValue)
+                  setPromptCursor(nextCursor)
+                  setSlashDismissed(false)
+                  setDatasetMenuDismissed(false)
+
+                  if (!getActivePromptTrigger(nextValue, nextCursor, "/")) {
                     hideSlashDescription()
-                    setSelectedSlashIndex((prev) => {
-                      const next = (prev + 1) % filteredSlashCommands.length
-                      scrollSlashOptionIntoView(next)
-                      return next
-                    })
-                    return
-                  }
-
-                  if (event.key === "ArrowUp") {
-                    event.preventDefault()
-                    hideSlashDescription()
-                    setSelectedSlashIndex((prev) => {
-                      const next = prev === 0 ? filteredSlashCommands.length - 1 : prev - 1
-                      scrollSlashOptionIntoView(next)
-                      return next
-                    })
-                    return
-                  }
-
-                  if (event.key === "Enter" || event.key === "Tab") {
-                    event.preventDefault()
-                    const selected = filteredSlashCommands[selectedSlashIndex]
-                    if (selected) {
-                      insertSlashCommand(selected)
-                    }
-                    return
-                  }
-
-                  if (event.key === "Escape") {
-                    event.preventDefault()
-                    setSlashDismissed(true)
-                    hideSlashDescription()
-                    return
-                  }
-                }
-
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault()
-                  if (!isRunning) {
-                    onSubmit()
-                  }
-                }
-              }}
-            />
-
-            <div className="flex shrink-0 flex-col items-center gap-2 self-end">
-              <button
-                type="button"
-                onClick={onToggleThinkingMode}
-                disabled={isRunning}
-                title={thinkingMode ? "Disable thinking mode" : "Enable thinking mode"}
-                aria-label={thinkingMode ? "Disable thinking mode" : "Enable thinking mode"}
-                aria-pressed={thinkingMode}
-                className={`flex h-9 w-9 items-center justify-center rounded-full border transition-colors ${
-                  thinkingMode
-                    ? "border-primary/45 bg-primary/10 text-primary"
-                    : "border-border bg-card text-muted-foreground hover:border-primary/25 hover:text-foreground"
-                } disabled:pointer-events-none disabled:opacity-50`}
-              >
-                <BrainCircuit className="size-4" />
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  if (!isRunning) {
-                    onSubmit()
                   }
                 }}
-                disabled={isRunning || !prompt.trim()}
-                className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary text-primary-foreground transition-colors hover:bg-primary/90 disabled:pointer-events-none disabled:opacity-40"
-              >
-                {isRunning ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
-              </button>
+                onClick={(event) => updatePromptCursor(event.currentTarget)}
+                onKeyUp={(event) => updatePromptCursor(event.currentTarget)}
+                onSelect={(event) => updatePromptCursor(event.currentTarget)}
+                onKeyDown={(event) => {
+                  if (showDatasetMenu) {
+                    if (event.key === "ArrowDown") {
+                      event.preventDefault()
+                      setSelectedDatasetIndex((prev) => (prev + 1) % filteredDatasets.length)
+                      return
+                    }
+
+                    if (event.key === "ArrowUp") {
+                      event.preventDefault()
+                      setSelectedDatasetIndex((prev) => prev === 0 ? filteredDatasets.length - 1 : prev - 1)
+                      return
+                    }
+
+                    if (event.key === "Enter" || event.key === "Tab") {
+                      event.preventDefault()
+                      const selected = filteredDatasets[activeDatasetIndex]
+                      if (selected) {
+                        insertDatasetMention(selected)
+                      }
+                      return
+                    }
+
+                    if (event.key === "Escape") {
+                      event.preventDefault()
+                      setDatasetMenuDismissed(true)
+                      return
+                    }
+                  }
+
+                  if (showSlashMenu) {
+                    const scrollSlashOptionIntoView = (index: number) => {
+                      const container = slashListRef.current
+                      if (!container) return
+                      const options = container.querySelectorAll<HTMLElement>("button[data-slash-option]")
+                      options[index]?.scrollIntoView({ block: "nearest" })
+                    }
+
+                    if (event.key === "ArrowDown") {
+                      event.preventDefault()
+                      hideSlashDescription()
+                      setSelectedSlashIndex((prev) => {
+                        const next = (prev + 1) % filteredSlashCommands.length
+                        scrollSlashOptionIntoView(next)
+                        return next
+                      })
+                      return
+                    }
+
+                    if (event.key === "ArrowUp") {
+                      event.preventDefault()
+                      hideSlashDescription()
+                      setSelectedSlashIndex((prev) => {
+                        const next = prev === 0 ? filteredSlashCommands.length - 1 : prev - 1
+                        scrollSlashOptionIntoView(next)
+                        return next
+                      })
+                      return
+                    }
+
+                    if (event.key === "Enter" || event.key === "Tab") {
+                      event.preventDefault()
+                      const selected = filteredSlashCommands[activeSlashIndex]
+                      if (selected) {
+                        insertSlashCommand(selected)
+                      }
+                      return
+                    }
+
+                    if (event.key === "Escape") {
+                      event.preventDefault()
+                      setSlashDismissed(true)
+                      hideSlashDescription()
+                      return
+                    }
+                  }
+
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault()
+                    if (!isRunning) {
+                      onSubmit()
+                    }
+                  }
+                }}
+              />
+            </div>
+
+            <div className="flex items-center justify-between gap-2 px-2 py-2">
+              <div className="flex min-w-0 items-center gap-2">
+                <button
+                  type="button"
+                  onClick={onToggleThinkingMode}
+                  disabled={isRunning}
+                  title={thinkingMode ? "Disable thinking mode" : "Enable thinking mode"}
+                  aria-label={thinkingMode ? "Disable thinking mode" : "Enable thinking mode"}
+                  aria-pressed={thinkingMode}
+                  className={`inline-flex h-8 items-center gap-1.5 rounded-md border px-2 text-[11px] font-medium transition-colors ${
+                    thinkingMode
+                      ? "border-primary/35 bg-primary/10 text-primary"
+                      : "border-border bg-card/70 text-muted-foreground hover:text-foreground"
+                  } disabled:pointer-events-none disabled:opacity-50`}
+                >
+                  <BrainCircuit className="size-3.5" />
+                  Think
+                </button>
+
+                {isRunning && (
+                  <div className="flex min-w-0 items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+                    <Loader2 className="size-3.5 shrink-0 animate-spin" />
+                    <span className="truncate">{thinkingMode ? "Thinking..." : "Running..."}</span>
+                  </div>
+                )}
+              </div>
+
+              {isRunning ? (
+                <button
+                  type="button"
+                  onClick={onCancel}
+                  className="inline-flex h-8 items-center gap-1.5 rounded-md border border-destructive/35 bg-destructive/10 px-2.5 text-xs font-semibold text-destructive transition-colors hover:bg-destructive/15"
+                >
+                  <Square className="size-3.5 fill-current" />
+                  Stop
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={onSubmit}
+                  disabled={!prompt.trim()}
+                  className="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary px-3 text-xs font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:pointer-events-none disabled:opacity-40"
+                >
+                  <Send className="size-3.5" />
+                  Send
+                </button>
+              )}
             </div>
           </div>
         </div>

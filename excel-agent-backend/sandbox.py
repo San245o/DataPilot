@@ -224,7 +224,13 @@ def _validate_code(code: str) -> None:
                 )
 
 
-def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _execute_in_sandbox(
+    code: str,
+    rows: list[dict[str, Any]],
+    datasets: dict[str, dict[str, Any]] | None = None,
+    active_dataset_id: str | None = None,
+    selection_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     _validate_code(code)
 
     df = pd.DataFrame(rows)
@@ -450,6 +456,85 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
         query_logs.append(value)
         return value
 
+    def _expand_selection_ranges(ranges: Any, row_limit: int) -> list[int]:
+        indices: list[int] = []
+        seen: set[int] = set()
+        if not isinstance(ranges, list):
+            return indices
+        for item in ranges:
+            if not isinstance(item, dict):
+                continue
+            try:
+                start = int(item.get("start", 0))
+                end = int(item.get("end", start))
+            except Exception:
+                continue
+            low = max(0, min(start, end))
+            high = min(row_limit - 1, max(start, end))
+            for index in range(low, high + 1):
+                if index not in seen:
+                    seen.add(index)
+                    indices.append(index)
+        return indices
+
+    def get_selected_row_indices() -> list[int]:
+        current_df = _get_df()
+        if not selection_context:
+            return []
+        if selection_context.get("applies_to_all_rows"):
+            return list(range(len(current_df.index)))
+
+        raw_indices = selection_context.get("row_indices")
+        if isinstance(raw_indices, list):
+            selected: list[int] = []
+            seen: set[int] = set()
+            for value in raw_indices:
+                try:
+                    index = int(value)
+                except Exception:
+                    continue
+                if 0 <= index < len(current_df.index) and index not in seen:
+                    seen.add(index)
+                    selected.append(index)
+            return selected
+
+        return _expand_selection_ranges(selection_context.get("row_ranges"), len(current_df.index))
+
+    def get_selected_columns() -> list[str]:
+        current_df = _get_df()
+        if not selection_context:
+            return []
+        if selection_context.get("applies_to_all_columns"):
+            return [str(column) for column in current_df.columns]
+
+        raw_columns = selection_context.get("columns")
+        if isinstance(raw_columns, list):
+            return [str(column) for column in raw_columns if str(column) in current_df.columns]
+
+        selected: list[str] = []
+        for item in selection_context.get("column_ranges") or []:
+            if not isinstance(item, dict):
+                continue
+            for column in item.get("columns") or []:
+                column_name = str(column)
+                if column_name in current_df.columns and column_name not in selected:
+                    selected.append(column_name)
+        return selected
+
+    def selected_df() -> pd.DataFrame:
+        current_df = _get_df()
+        row_indices = get_selected_row_indices()
+        columns = get_selected_columns()
+
+        if not row_indices and selection_context and not selection_context.get("applies_to_all_rows"):
+            scoped = current_df.iloc[[]]
+        else:
+            scoped = current_df.iloc[row_indices] if row_indices else current_df
+
+        if columns:
+            return scoped.loc[:, columns].copy()
+        return scoped.copy()
+
     safe_builtins = {
         "abs": builtins.abs,
         "all": builtins.all,
@@ -506,6 +591,23 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
         "Exception": builtins.Exception,
     }
 
+    dfs: dict[str, pd.DataFrame] = {}
+    for dataset_id, dataset in (datasets or {}).items():
+        dataset_rows = dataset.get("rows") or []
+        dataset_name = str(dataset.get("name") or dataset_id)
+        dataset_df = pd.DataFrame(dataset_rows)
+        dataset_df.replace("", np.nan, inplace=True)
+        for col in dataset_df.columns:
+            if pd.api.types.is_object_dtype(dataset_df[col]):
+                dataset_df[col] = dataset_df[col].map(lambda v: v.strip() if isinstance(v, str) else v)
+        dfs[dataset_id] = dataset_df.copy()
+        dfs[dataset_name] = dataset_df.copy()
+
+    if active_dataset_id:
+        active_name = str((datasets or {}).get(active_dataset_id, {}).get("name") or active_dataset_id)
+        dfs[active_dataset_id] = df.copy()
+        dfs[active_name] = df.copy()
+
     env.update({
         "__builtins__": safe_builtins,
         "pd": pd,
@@ -517,6 +619,11 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
         "re": re,
         "unicodedata": unicodedata,
         "df": df.copy(),
+        "dfs": dfs,
+        "selection_context": selection_context or None,
+        "get_selected_row_indices": get_selected_row_indices,
+        "get_selected_columns": get_selected_columns,
+        "selected_df": selected_df,
         "log_output": log_output,
         "print": safe_print,
         "print_query": print_query,
@@ -596,13 +703,26 @@ def _execute_in_sandbox(code: str, rows: list[dict[str, Any]]) -> dict[str, Any]
     }
 
 
-def run_sandboxed(code: str, rows: list[dict[str, Any]], timeout_seconds: int = 30) -> SandboxResult:
+def run_sandboxed(
+    code: str,
+    rows: list[dict[str, Any]],
+    timeout_seconds: int = 30,
+    datasets: dict[str, dict[str, Any]] | None = None,
+    active_dataset_id: str | None = None,
+    selection_context: dict[str, Any] | None = None,
+) -> SandboxResult:
     result_container: dict[str, Any] = {}
     error_container: dict[str, str] = {}
 
     def _target() -> None:
         try:
-            result_container.update(_execute_in_sandbox(code, rows))
+            result_container.update(_execute_in_sandbox(
+                code,
+                rows,
+                datasets=datasets,
+                active_dataset_id=active_dataset_id,
+                selection_context=selection_context,
+            ))
         except SandboxViolation as exc:
             error_container["error"] = f"Sandbox violation: {exc}"
         except Exception as exc:

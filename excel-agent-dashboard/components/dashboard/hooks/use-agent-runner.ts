@@ -7,6 +7,7 @@ import {
   normalizeRows,
   type AgentExecuteResponse,
   type ChatMessage,
+  type DataSelectionContext,
   type HighlightedColumn,
   type PivotTableTab,
   type QueryTablePayload,
@@ -14,16 +15,21 @@ import {
   type ThinkingTraceEntry,
   type TokenUsageSummary,
   type VisualizationPayload,
+  type WorkspaceDataset,
 } from "@/components/dashboard/dashboard-shared"
 
-const API_BASE_URL = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api/backend").replace(/\/$/, "")
+export const API_BASE_URL = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api/backend").replace(/\/$/, "")
 
 type RunAgentInput = {
   prompt: string
   rows: SheetRow[]
+  activeDatasetId?: string | null
+  selectedDatasetIds?: string[]
+  datasetNames?: Record<string, string>
   modelName: string
   history: ChatMessage[]
   thinkingMode: boolean
+  selectionContext?: DataSelectionContext | null
   onThinkingTrace?: (entry: ThinkingTraceEntry) => void
 }
 
@@ -34,13 +40,15 @@ type AgentRunSuccessData = {
   highlightedColumns: HighlightedColumn[]
   mutation: boolean
   visualizationPayload: VisualizationPayload | null
+  updatedDatasets: WorkspaceDataset[]
+  createdDatasets: WorkspaceDataset[]
   assistantMessage: ChatMessage
   tokenUsage?: TokenUsageSummary
 }
 
 export type AgentRunResponse =
   | { ok: true; data: AgentRunSuccessData }
-  | { ok: false; error: string }
+  | { ok: false; error: string; cancelled?: boolean }
 
 function normalizeQueryTables(tables: QueryTablePayload[] | undefined): PivotTableTab[] {
   if (!Array.isArray(tables)) return []
@@ -58,6 +66,23 @@ function normalizeQueryTables(tables: QueryTablePayload[] | undefined): PivotTab
 function normalizeFinalPayload(finalPayload: AgentExecuteResponse): AgentRunSuccessData {
   const nextRows = Array.isArray(finalPayload.rows) ? normalizeRows(finalPayload.rows) : []
   const responseTables = normalizeQueryTables(finalPayload.query_tables)
+  const normalizeDatasetResults = (items: NonNullable<AgentExecuteResponse["updated_datasets"]>): WorkspaceDataset[] =>
+    items.map((item) => {
+      const rows = normalizeRows(item.rows ?? [])
+      const [fileName, sheetName] = String(item.name || item.dataset_id).split(" / ", 2)
+      return {
+        id: item.dataset_id,
+        fileName: fileName || item.name || item.dataset_id,
+        sheetName,
+        displayName: item.name || item.dataset_id,
+        rows,
+        rowCount: rows.length,
+        columnCount: Object.keys(rows[0] ?? {}).length,
+        kind: item.kind ?? "uploaded",
+        modified: Boolean(item.modified),
+        sourceDatasetIds: item.source_dataset_ids ?? [],
+      }
+    })
   const assistantMessage: ChatMessage = {
     role: "assistant",
     content: finalPayload.assistant_reply ?? "Done.",
@@ -74,6 +99,8 @@ function normalizeFinalPayload(finalPayload: AgentExecuteResponse): AgentRunSucc
     highlightedColumns: Array.isArray(finalPayload.highlighted_columns) ? finalPayload.highlighted_columns : [],
     mutation: Boolean(finalPayload.mutation),
     visualizationPayload: finalPayload.visualization ?? null,
+    updatedDatasets: normalizeDatasetResults(finalPayload.updated_datasets ?? []),
+    createdDatasets: normalizeDatasetResults(finalPayload.created_datasets ?? []),
     assistantMessage,
     tokenUsage: finalPayload.token_usage,
   }
@@ -94,22 +121,37 @@ class ThinkingStreamBackendError extends Error {
 async function fetchThinkingFinalFallback({
   expandedPrompt,
   rows,
+  activeDatasetId,
+  selectedDatasetIds,
+  datasetNames,
   modelName,
   history,
+  selectionContext,
+  signal,
 }: {
   expandedPrompt: string
   rows: SheetRow[]
+  activeDatasetId?: string | null
+  selectedDatasetIds?: string[]
+  datasetNames?: Record<string, string>
   modelName: string
   history: ChatMessage[]
+  selectionContext?: DataSelectionContext | null
+  signal?: AbortSignal
 }): Promise<AgentExecuteResponse> {
   const response = await fetch(`${API_BASE_URL}/agent/think`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    signal,
     body: JSON.stringify({
       prompt: expandedPrompt,
       rows,
+      active_dataset_id: activeDatasetId,
+      selected_dataset_ids: selectedDatasetIds ?? [],
+      dataset_names: datasetNames ?? {},
       model: modelName,
       thinking_mode: true,
+      selection_context: selectionContext ?? null,
       history: history.map((message) => ({
         role: message.role,
         content: message.role === "user" ? expandSlashPrompt(message.content) : message.content,
@@ -137,6 +179,7 @@ export function useAgentRunner() {
   const [isRunning, setIsRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const isRunningRef = useRef(false)
+  const abortControllerRef = useRef<AbortController | null>(null)
 
   const clearError = useCallback(() => {
     setError(null)
@@ -145,9 +188,13 @@ export function useAgentRunner() {
   const runAgent = useCallback(async ({
     prompt,
     rows,
+    activeDatasetId,
+    selectedDatasetIds,
+    datasetNames,
     modelName,
     history,
     thinkingMode,
+    selectionContext,
     onThinkingTrace,
   }: RunAgentInput): Promise<AgentRunResponse> => {
     if (isRunningRef.current) {
@@ -162,7 +209,9 @@ export function useAgentRunner() {
       ? `${API_BASE_URL}/agent/think/stream`
       : `${API_BASE_URL}/agent/execute`
     const expandedPrompt = expandSlashPrompt(prompt.trim())
+    const abortController = new AbortController()
 
+    abortControllerRef.current = abortController
     isRunningRef.current = true
     setIsRunning(true)
     setError(null)
@@ -173,11 +222,16 @@ export function useAgentRunner() {
       const response = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: abortController.signal,
         body: JSON.stringify({
           prompt: expandedPrompt,
           rows,
+          active_dataset_id: activeDatasetId,
+          selected_dataset_ids: selectedDatasetIds ?? [],
+          dataset_names: datasetNames ?? {},
           model: modelName,
           thinking_mode: thinkingMode,
+          selection_context: selectionContext ?? null,
           history: history.map((message) => ({
             role: message.role,
             content: message.role === "user" ? expandSlashPrompt(message.content) : message.content,
@@ -234,6 +288,10 @@ export function useAgentRunner() {
             }
           }
         } catch (streamError) {
+          if (abortController.signal.aborted || (streamError instanceof Error && streamError.name === "AbortError")) {
+            throw streamError
+          }
+
           if (streamError instanceof ThinkingStreamBackendError) {
             throw streamError
           }
@@ -248,8 +306,13 @@ export function useAgentRunner() {
           const fallbackPayload = await fetchThinkingFinalFallback({
             expandedPrompt,
             rows,
+            activeDatasetId,
+            selectedDatasetIds,
+            datasetNames,
             modelName,
             history,
+            selectionContext,
+            signal: abortController.signal,
           })
           return {
             ok: true,
@@ -273,8 +336,13 @@ export function useAgentRunner() {
           const fallbackPayload = await fetchThinkingFinalFallback({
             expandedPrompt,
             rows,
+            activeDatasetId,
+            selectedDatasetIds,
+            datasetNames,
             modelName,
             history,
+            selectionContext,
+            signal: abortController.signal,
           })
           return {
             ok: true,
@@ -298,6 +366,13 @@ export function useAgentRunner() {
         data: normalizeFinalPayload(finalPayload),
       }
     } catch (agentError) {
+      if (
+        abortController.signal.aborted ||
+        (agentError instanceof Error && agentError.name === "AbortError")
+      ) {
+        return { ok: false, error: "Request stopped.", cancelled: true }
+      }
+
       const message =
         agentError instanceof TypeError && agentError.message.includes("fetch")
           ? `Failed to reach backend at ${lastAttemptedUrl}. If you are running the dashboard in a remote/devcontainer setup, use the default /api/backend proxy or set NEXT_PUBLIC_API_BASE_URL to a reachable URL.`
@@ -309,11 +384,19 @@ export function useAgentRunner() {
       return { ok: false, error: message }
     } finally {
       isRunningRef.current = false
+      if (abortControllerRef.current === abortController) {
+        abortControllerRef.current = null
+      }
       setIsRunning(false)
     }
   }, [])
 
+  const cancelRun = useCallback(() => {
+    abortControllerRef.current?.abort()
+  }, [])
+
   return {
+    cancelRun,
     clearError,
     error,
     isRunning,

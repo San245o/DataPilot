@@ -4,6 +4,19 @@ import type { Data, Frame, Layout } from "plotly.js"
 export type CellValue = string | number | boolean | null
 export type SheetRow = Record<string, CellValue>
 
+export type WorkspaceDataset = {
+  id: string
+  fileName: string
+  sheetName?: string
+  displayName: string
+  rows: SheetRow[]
+  rowCount: number
+  columnCount: number
+  kind: "uploaded" | "derived"
+  modified: boolean
+  sourceDatasetIds?: string[]
+}
+
 export type VisualizationPayload = {
   data?: Data[]
   layout?: Partial<Layout>
@@ -18,6 +31,54 @@ export type QueryTablePayload = {
 
 export type HighlightedColumn = {
   column: string
+}
+
+export type CellRangeSelection = {
+  startRowIndex: number
+  endRowIndex: number
+  startColumnIndex: number
+  endColumnIndex: number
+}
+
+export type RowRangeSelection = {
+  startRowIndex: number
+  endRowIndex: number
+}
+
+export type ColumnRangeSelection = {
+  startColumnIndex: number
+  endColumnIndex: number
+}
+
+export type DataGridSelection = {
+  rowRanges: RowRangeSelection[]
+  columnRanges: ColumnRangeSelection[]
+  cellRanges: CellRangeSelection[]
+}
+
+export type DataSelectionContext = {
+  dataset_id: string
+  dataset_name: string
+  selection_type: "rows" | "columns" | "cells" | "mixed"
+  row_count: number
+  column_count: number
+  cell_count: number
+  applies_to_all_rows: boolean
+  applies_to_all_columns: boolean
+  row_ranges: Array<{ start: number; end: number }>
+  column_ranges: Array<{ start: number; end: number; columns: string[] }>
+  columns: string[]
+  row_indices?: number[]
+  cells?: Array<{ row_index: number; column: string }>
+  row_id_column?: string
+  row_ids?: Array<string | number | boolean | null>
+  preview_rows: Array<{
+    row_index: number
+    row_id?: string | number | boolean | null
+    values: SheetRow
+  }>
+  compact: boolean
+  summary: string
 }
 
 export type ThinkingTraceEntry = {
@@ -37,6 +98,23 @@ export type TokenUsageSummary = {
 
 export type AgentExecuteResponse = {
   rows?: SheetRow[]
+  active_dataset_id?: string | null
+  updated_datasets?: Array<{
+    dataset_id: string
+    name: string
+    rows: SheetRow[]
+    kind?: "uploaded" | "derived"
+    source_dataset_ids?: string[]
+    modified?: boolean
+  }>
+  created_datasets?: Array<{
+    dataset_id: string
+    name: string
+    rows: SheetRow[]
+    kind?: "uploaded" | "derived"
+    source_dataset_ids?: string[]
+    modified?: boolean
+  }>
   visualization?: VisualizationPayload | null
   query_output?: string | null
   query_tables?: QueryTablePayload[]
@@ -142,6 +220,7 @@ export const THINKING_MODEL_OPTIONS = MODEL_OPTIONS.filter(
 
 export const SLASH_COMMANDS: SlashCommandOption[] = [
   { command: "/visualize", description: "Build a chart (bar, line, scatter, pie, heatmap).", rewritePrefix: "Create a visualization." },
+  { command: "/visualise", description: "Build a chart (bar, line, scatter, pie, heatmap).", rewritePrefix: "Create a visualization." },
   { command: "/modify", description: "Update rows/columns in the main dataset.", rewritePrefix: "Modify the dataset." },
   { command: "/extract", description: "Create a separate result table from selected rows/columns.", rewritePrefix: "[FORCE_EXTRACT_TABLE] Create a separate extracted table. Use a new result table instead of answering only in chat." },
   { command: "/filter", description: "Find matching rows without mutating source data.", rewritePrefix: "Filter the dataset to find matching rows." },
@@ -165,21 +244,22 @@ export function clamp(value: number, min: number, max: number) {
 }
 
 export function getActiveSlashQuery(text: string): string | null {
-  const trimmed = text.trimStart()
-  if (!trimmed.startsWith("/")) return null
-  const firstToken = trimmed.split(/\s+/, 1)[0]
-  if (firstToken.length < 1 || trimmed.includes(" ")) return null
-  return firstToken.slice(1).toLowerCase()
+  const match = text.match(/(^|\s)\/([^\s/]*)$/)
+  return match ? match[2].toLowerCase() : null
 }
 
 export function expandSlashPrompt(rawPrompt: string): string {
-  const trimmed = rawPrompt.trim()
-  if (!trimmed.startsWith("/")) return rawPrompt
-  const [commandToken, ...restParts] = trimmed.split(/\s+/)
-  const rest = restParts.join(" ").trim()
-  const matched = SLASH_COMMANDS.find((item) => item.command === commandToken.toLowerCase())
+  const match = rawPrompt.match(/(^|\s)(\/[^\s]+)(?=\s|$)/)
+  if (!match || match.index === undefined) return rawPrompt
+
+  const commandStart = match.index + match[1].length
+  const commandToken = match[2].toLowerCase()
+  const matched = SLASH_COMMANDS.find((item) => item.command === commandToken)
   if (!matched) return rawPrompt
-  return rest ? `${matched.rewritePrefix} ${rest}` : matched.rewritePrefix
+
+  const before = rawPrompt.slice(0, commandStart).trim()
+  const after = rawPrompt.slice(commandStart + match[2].length).trim()
+  return [before, matched.rewritePrefix, after].filter(Boolean).join(" ")
 }
 
 export function normalizeRows(rows: ReadonlyArray<Record<string, unknown>>): SheetRow[] {

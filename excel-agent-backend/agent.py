@@ -16,7 +16,7 @@ SYSTEM_PROMPT_BASE = """You are a data analysis agent using pandas and plotly.
 RESPONSE FORMAT - Return ONLY valid JSON (no markdown):
 {"code": "python code", "assistant_reply": "markdown response", "action_type": "query|mutation|visualization|combined", "table_request": {"enabled": false, "title": ""}}
 
-ENV: df (DataFrame), pd(pandas), np(numpy), math, px(plotly.express), go(plotly.graph_objects), make_subplots(plotly.subplots.make_subplots), re(regex), unicodedata, pre-loaded. NO imports. End with result_df=df.
+ENV: df (active DataFrame), dfs (dict of selected DataFrames by dataset id and display name), pd(pandas), np(numpy), math, px(plotly.express), go(plotly.graph_objects), make_subplots(plotly.subplots.make_subplots), re(regex), unicodedata, pre-loaded. NO imports. End with result_df=df for active-dataset tasks, or result_df=<new DataFrame> for explicit multi-dataset outputs.
 
 HELPERS:
 - log_output(msg) - log text or pass a DataFrame/Series directly (e.g. log_output(df)) to populate the UI table. Do NOT use .to_string() for tables!
@@ -25,6 +25,10 @@ HELPERS:
 - highlight_rows(indices) - pass a list of ALL matching indices (do not truncate or slice the list)
 - highlight_column(column) - highlight one important column header in the UI
 - highlight_columns(columns) - highlight multiple relevant column headers in the UI while rows stay highlighted
+- selection_context - dict describing a user-attached base-table selection, when provided
+- get_selected_row_indices() - expand selected rows from the attached selection; for column-only selections this returns all row indices
+- get_selected_columns() - selected column names; for row-only selections this returns all columns
+- selected_df() - DataFrame view limited to the attached selected row/column scope
 - text_equals(column, value) - case-insensitive exact match with stripped whitespace
 - text_contains(column, value) - case-insensitive contains match
 - to_numeric_clean(column_or_series) - strips currency/non-numeric chars then converts with pd.to_numeric(errors='coerce')
@@ -52,6 +56,9 @@ RULES:
 - If you mutate data (add/delete/update rows, append multiple rows, sort/reorder rows, or modify columns), set action_type='mutation' unless any additional output is also requested, then use action_type='combined'.
 - Multi-step tasks are allowed. If the user asks to clean/modify/filter/aggregate and then visualize or summarize, do all requested steps in one code block using the updated `df`, and return the final chart in `fig`.
 - For query/visualization requests, never replace `df` or `result_df` with a filtered subset; use print_query/log_output/highlight_rows and keep `result_df=df`.
+- Multiple selected datasets are available in `dfs`. Keys include both dataset ids and readable names, e.g. `dfs['orders.xlsx / Jan']`. Use multiple datasets when the user explicitly asks for work across files, such as merge, join, append, compare, lookup, match, consolidate, top/rank/list across selected files, pivot, chart, plot, or visualization. Otherwise work only with `df`.
+- If Selection context is provided, it came from the user selecting base-table cells/rows/columns and attaching the selected-range chip in chat. When the prompt says selected/selection/these/this range/within that, restrict queries and mutations to that selected scope. For mutations inside a selection, use get_selected_row_indices(), get_selected_columns(), selected_df(), or selection_context ranges, and do not edit outside the selected rows/columns/cells unless the user explicitly asks for that.
+- For explicit multi-dataset output tasks, create a new DataFrame such as `merged` or `comparison`, log it with `log_output(...)`, and set `result_df` to that new DataFrame. Do not overwrite source DataFrames.
 - For structural MUTATIONS (add/drop columns/rows, clean datatypes): Modify `df` directly, return `result_df=df`, and set `table_request.enabled=False`. Do NOT create separate tables for this.
 - Cleaning, standardizing, coercing numeric columns, removing strings from numeric fields, and making values positive are mutation tasks. Persist the cleaned `df` instead of only logging summary statistics.
 - For FINDING/SEARCHING/FILTERING: use `highlight_rows(df[mask].index.tolist())` and also highlight the most relevant worked-with columns using `highlight_column(...)` or `highlight_columns([...])`.
@@ -128,7 +135,7 @@ HEATMAP MATRIX RULE:
 """
 
 MERGE_RULES = """
-MERGE: Only one df available. Self-join: subset=df[df['Type']=='A']; merged=df.merge(subset[['Key','Val']],on='Key')
+MERGE: Use selected DataFrames from dfs. Example: left=dfs['orders.xlsx / Jan']; right=dfs['customers.xlsx / Master']; merged=left.merge(right,on='customer_id',how='left'); log_output(merged); result_df=merged
 """
 
 STATS_RULES = """
@@ -642,6 +649,8 @@ def generate_code(
     top_categories: dict[str, list],
     sample_rows: list[dict[str, Any]],
     history: list[dict[str, str]],
+    dataset_contexts: list[dict[str, Any]] | None = None,
+    selection_context: dict[str, Any] | None = None,
     thinking_mode: bool = False,
 ) -> dict[str, Any]:
     system_prompt = _build_system_prompt(prompt)
@@ -684,6 +693,24 @@ def generate_code(
     # Sample rows - only 2 rows max
     if sample_rows:
         ctx.append(f"Sample: {json.dumps(sample_rows[:2])}")
+
+    if dataset_contexts:
+        compact_contexts = []
+        for item in dataset_contexts[:8]:
+            compact_contexts.append({
+                "dataset_id": item.get("dataset_id"),
+                "name": item.get("name"),
+                "row_count": item.get("row_count"),
+                "columns": item.get("columns"),
+                "types": item.get("dtypes"),
+                "sample_rows": (item.get("sample_rows") or [])[:2],
+                "ranges": item.get("value_ranges"),
+                "categories": item.get("top_categories"),
+            })
+        ctx.append(f"Selected datasets: {json.dumps(compact_contexts)}")
+
+    if selection_context:
+        ctx.append(f"Selection context: {json.dumps(selection_context)}")
 
     # History - already trimmed
     if trimmed_history:
@@ -749,6 +776,7 @@ def generate_fix(
     dtypes: dict[str, str],
     original_code: str,
     error_message: str,
+    selection_context: dict[str, Any] | None = None,
     thinking_mode: bool = False,
 ) -> dict[str, Any]:
     system_prompt = _build_system_prompt(prompt)
@@ -758,6 +786,7 @@ def generate_fix(
     user_message = f"""Original request: {prompt}
 Columns: {json.dumps(columns)}
 Types: {json.dumps(dtypes)}
+Selection context: {json.dumps(selection_context) if selection_context else "none"}
 
 FAILED CODE:
 ```python
