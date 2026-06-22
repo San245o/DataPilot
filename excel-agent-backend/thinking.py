@@ -1078,8 +1078,8 @@ def _execute_web_search_tool(rows: list[dict[str, Any]], args: dict[str, Any]) -
                 mutation=False,
                 highlight_indices=[],
                 highlighted_columns=[],
-                observation=_truncate(observation, 800),
-                raw_observation=_truncate(json.dumps(res_json), MAX_OBSERVATION_CHARS),
+                observation=observation[:800],
+                raw_observation=json.dumps(res_json)[:MAX_OBSERVATION_CHARS],
                 code=f"web_search(query={repr(query)})",
                 error=None,
             )

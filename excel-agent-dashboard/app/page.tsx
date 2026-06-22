@@ -384,10 +384,10 @@ export default function LandingPage() {
       {/* Navigation */}
       <header className="fixed top-0 w-full z-50 bg-[#0b1326]/10 backdrop-blur-md border-b border-[#3c4a42]/20 shadow-sm">
         <nav className="flex justify-between items-center px-6 h-16 w-full max-w-7xl mx-auto">
-          <div className="flex items-center gap-2">
+          <a href="#hero" className="flex items-center gap-2 cursor-pointer select-none">
             <span className="font-extrabold text-2xl text-[#4edea3] tracking-tighter">DataPilot</span>
             <div className="pulse-dot"></div>
-          </div>
+          </a>
           <div className="hidden md:flex items-center gap-10">
             <a href="#hero" className={`text-sm font-semibold transition-all duration-300 ${activeSection === "hero" ? "text-[#4edea3] border-b border-[#4edea3] pb-1" : "text-[#bbcabf] hover:text-[#4edea3]"}`}>Home</a>
             <a href="#problem" className={`text-sm font-semibold transition-all duration-300 ${activeSection === "problem" ? "text-[#4edea3] border-b border-[#4edea3] pb-1" : "text-[#bbcabf] hover:text-[#4edea3]"}`}>Problem</a>
@@ -419,7 +419,7 @@ export default function LandingPage() {
               Meet DataPilot: The AI agent that cleans, analyzes, and transforms your data in seconds. Stop wrestling with cells, start making decisions.
             </p>
             <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
-              <Link href="/dashboard" className="w-full sm:w-auto bg-[#4edea3] text-[#003824] px-8 py-3.5 rounded-lg text-sm font-bold hover-lift active:scale-95 text-center">Start Your Free Trial</Link>
+              <Link href="/dashboard" className="w-full sm:w-auto bg-[#4edea3] text-[#003824] px-8 py-3.5 rounded-lg text-sm font-bold hover-lift active:scale-95 text-center">Start Analysing</Link>
               <Link href="/dashboard" className="w-full sm:w-auto glass-card text-white px-8 py-3.5 rounded-lg text-sm font-semibold border border-[#3c4a42] hover:bg-[#2d3449]/20 transition-all text-center">Watch Demo</Link>
             </div>
           </div>
@@ -637,7 +637,7 @@ export default function LandingPage() {
               </h2>
               <p className="text-xs md:text-base text-[#bbcabf] mb-8 max-w-xl mx-auto leading-relaxed">Join 10,000+ analysts who have reclaimed 20 hours a week with DataPilot.</p>
               <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
-                <Link href="/dashboard" className="w-full sm:w-auto bg-[#4edea3] text-[#003824] px-8 py-3.5 rounded-xl text-sm font-bold shadow-[0_0_40px_rgba(78,222,163,0.4)] hover:shadow-[0_0_60px_rgba(78,222,163,0.6)] transition-all active:scale-95 text-center">Start Your Free Trial</Link>
+                <Link href="/dashboard" className="w-full sm:w-auto bg-[#4edea3] text-[#003824] px-8 py-3.5 rounded-xl text-sm font-bold shadow-[0_0_40px_rgba(78,222,163,0.4)] hover:shadow-[0_0_60px_rgba(78,222,163,0.6)] transition-all active:scale-95 text-center">Start Analysing</Link>
                 <div className="flex items-center gap-2 mt-4 sm:mt-0 text-[10px] text-[#bbcabf] font-mono">
                   <ShieldCheck className="size-4 text-[#4edea3]" />
                   No credit card required
@@ -650,7 +650,7 @@ export default function LandingPage() {
           <footer className="w-full max-w-7xl mx-auto mt-4 pt-4 border-t border-[#3c4a42]/30">
             <div className="flex flex-col md:flex-row justify-between items-center gap-4">
               <div className="flex flex-col items-center md:items-start gap-1">
-                <span className="font-extrabold text-xl text-[#4edea3]">DataPilot</span>
+                <a href="#hero" className="font-extrabold text-xl text-[#4edea3] cursor-pointer">DataPilot</a>
                 <p className="text-[10px] text-[#bbcabf]">© 2026 DataPilot AI. All rights reserved.</p>
               </div>
               <div className="flex flex-wrap justify-center gap-4 md:gap-8">
