@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useRef } from "react"
+import { useEffect, useRef, useState } from "react"
 import Link from "next/link"
 import { 
   Sparkles, 
@@ -163,13 +163,66 @@ export default function LandingPage() {
     }
   }, [])
 
-  // Enable scrolling for landing page overriding global styling constraints
+  const [activeSection, setActiveSection] = useState("hero")
+
+  // Enable scrolling and scroll snapping for landing page overriding global dashboard styling constraints
   useEffect(() => {
+    const origHtmlSnap = document.documentElement.style.scrollSnapType
+    const origHtmlBehavior = document.documentElement.style.scrollBehavior
+    const origHtmlOverflow = document.documentElement.style.overflow
+    const origBodySnap = document.body.style.scrollSnapType
+    const origBodyBehavior = document.body.style.scrollBehavior
+    const origBodyOverflow = document.body.style.overflow
+
+    document.documentElement.style.scrollSnapType = "y mandatory"
+    document.documentElement.style.scrollBehavior = "smooth"
     document.documentElement.style.overflow = "auto"
+    
+    document.body.style.scrollSnapType = "y mandatory"
+    document.body.style.scrollBehavior = "smooth"
     document.body.style.overflow = "auto"
+
     return () => {
-      document.documentElement.style.overflow = ""
-      document.body.style.overflow = ""
+      document.documentElement.style.scrollSnapType = origHtmlSnap
+      document.documentElement.style.scrollBehavior = origHtmlBehavior
+      document.documentElement.style.overflow = origHtmlOverflow
+      
+      document.body.style.scrollSnapType = origBodySnap
+      document.body.style.scrollBehavior = origBodyBehavior
+      document.body.style.overflow = origBodyOverflow
+    }
+  }, [])
+
+  // Track active section for navigation highlighting and dot indicator
+  useEffect(() => {
+    const sections = ["hero", "problem", "features", "cta"]
+    const observers = sections.map((id) => {
+      const el = document.getElementById(id)
+      if (!el) return null
+      
+      const observer = new IntersectionObserver(
+        ([entry]) => {
+          if (entry.isIntersecting) {
+            setActiveSection(id)
+          }
+        },
+        { 
+          root: null,
+          rootMargin: "-25% 0px -25% 0px", // Trigger when the section occupies the center area
+          threshold: 0.1 
+        }
+      )
+      
+      observer.observe(el)
+      return { observer, el }
+    })
+
+    return () => {
+      observers.forEach((obs) => {
+        if (obs) {
+          obs.observer.unobserve(obs.el)
+        }
+      })
     }
   }, [])
 
@@ -308,6 +361,26 @@ export default function LandingPage() {
         <div className="absolute inset-0 data-grid-overlay"></div>
       </div>
 
+      {/* Floating Dot Navigation */}
+      <div className="fixed right-6 top-1/2 -translate-y-1/2 z-50 hidden md:flex flex-col gap-4 bg-slate-950/40 backdrop-blur-md p-3 rounded-full border border-slate-800/60">
+        <a href="#hero" className="group relative flex items-center justify-center">
+          <div className={`w-2.5 h-2.5 rounded-full transition-all duration-300 ${activeSection === "hero" ? "bg-[#4edea3] scale-125 shadow-[0_0_8px_#4edea3]" : "bg-[#bbcabf]/50 hover:bg-[#4edea3]"}`}></div>
+          <span className="absolute right-8 bg-[#0b1326] border border-[#3c4a42]/50 text-[#4edea3] text-[10px] font-mono px-2 py-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">01 // HOME</span>
+        </a>
+        <a href="#problem" className="group relative flex items-center justify-center">
+          <div className={`w-2.5 h-2.5 rounded-full transition-all duration-300 ${activeSection === "problem" ? "bg-[#4edea3] scale-125 shadow-[0_0_8px_#4edea3]" : "bg-[#bbcabf]/50 hover:bg-[#4edea3]"}`}></div>
+          <span className="absolute right-8 bg-[#0b1326] border border-[#3c4a42]/50 text-[#4edea3] text-[10px] font-mono px-2 py-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">02 // PROBLEM</span>
+        </a>
+        <a href="#features" className="group relative flex items-center justify-center">
+          <div className={`w-2.5 h-2.5 rounded-full transition-all duration-300 ${activeSection === "features" ? "bg-[#4edea3] scale-125 shadow-[0_0_8px_#4edea3]" : "bg-[#bbcabf]/50 hover:bg-[#4edea3]"}`}></div>
+          <span className="absolute right-8 bg-[#0b1326] border border-[#3c4a42]/50 text-[#4edea3] text-[10px] font-mono px-2 py-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">03 // FEATURES</span>
+        </a>
+        <a href="#cta" className="group relative flex items-center justify-center">
+          <div className={`w-2.5 h-2.5 rounded-full transition-all duration-300 ${activeSection === "cta" ? "bg-[#4edea3] scale-125 shadow-[0_0_8px_#4edea3]" : "bg-[#bbcabf]/50 hover:bg-[#4edea3]"}`}></div>
+          <span className="absolute right-8 bg-[#0b1326] border border-[#3c4a42]/50 text-[#4edea3] text-[10px] font-mono px-2 py-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">04 // START</span>
+        </a>
+      </div>
+
       {/* Navigation */}
       <header className="fixed top-0 w-full z-50 bg-[#0b1326]/10 backdrop-blur-md border-b border-[#3c4a42]/20 shadow-sm">
         <nav className="flex justify-between items-center px-6 h-16 w-full max-w-7xl mx-auto">
@@ -316,10 +389,10 @@ export default function LandingPage() {
             <div className="pulse-dot"></div>
           </div>
           <div className="hidden md:flex items-center gap-10">
-            <a className="text-sm text-[#4edea3] font-bold border-b-2 border-[#4edea3] pb-1" href="#hero">Features</a>
-            <a className="text-sm text-[#bbcabf] hover:text-[#4edea3] transition-colors" href="#">Case Studies</a>
-            <a className="text-sm text-[#bbcabf] hover:text-[#4edea3] transition-colors" href="#">Documentation</a>
-            <a className="text-sm text-[#bbcabf] hover:text-[#4edea3] transition-colors" href="#">Pricing</a>
+            <a href="#hero" className={`text-sm font-semibold transition-all duration-300 ${activeSection === "hero" ? "text-[#4edea3] border-b border-[#4edea3] pb-1" : "text-[#bbcabf] hover:text-[#4edea3]"}`}>Home</a>
+            <a href="#problem" className={`text-sm font-semibold transition-all duration-300 ${activeSection === "problem" ? "text-[#4edea3] border-b border-[#4edea3] pb-1" : "text-[#bbcabf] hover:text-[#4edea3]"}`}>Problem</a>
+            <a href="#features" className={`text-sm font-semibold transition-all duration-300 ${activeSection === "features" ? "text-[#4edea3] border-b border-[#4edea3] pb-1" : "text-[#bbcabf] hover:text-[#4edea3]"}`}>Features</a>
+            <a href="#cta" className={`text-sm font-semibold transition-all duration-300 ${activeSection === "cta" ? "text-[#4edea3] border-b border-[#4edea3] pb-1" : "text-[#bbcabf] hover:text-[#4edea3]"}`}>Get Started</a>
           </div>
           <div className="flex items-center gap-4">
             <Link href="/dashboard" className="text-xs font-semibold text-[#bbcabf] hover:text-white cursor-pointer active:scale-95 transition-all">Login</Link>
@@ -328,9 +401,12 @@ export default function LandingPage() {
         </nav>
       </header>
 
-      <main className="relative z-10 pt-16">
-        {/* Hero Section */}
-        <section className="min-h-screen flex items-center justify-center px-6 relative overflow-hidden" id="hero">
+      <main className="relative z-10">
+        {/* Section 1: Hero Section */}
+        <section 
+          id="hero"
+          className="h-screen w-full shrink-0 snap-start flex items-center justify-center px-6 relative overflow-hidden"
+        >
           <div ref={heroRef} className="max-w-4xl text-center parallax-layer" data-speed="0.1">
             <div className="inline-flex items-center gap-2 px-4 py-1.5 bg-[#4edea3]/10 border border-[#4edea3]/20 rounded-full mb-6">
               <Sparkles className="size-4 text-[#4edea3]" />
@@ -347,58 +423,72 @@ export default function LandingPage() {
               <Link href="/dashboard" className="w-full sm:w-auto glass-card text-white px-8 py-3.5 rounded-lg text-sm font-semibold border border-[#3c4a42] hover:bg-[#2d3449]/20 transition-all text-center">Watch Demo</Link>
             </div>
           </div>
+          
+          {/* Glowing Separator Line */}
+          <div className="absolute bottom-0 left-0 right-0 h-[1px] bg-gradient-to-r from-transparent via-[#4edea3]/30 to-transparent"></div>
         </section>
 
-        {/* Problem/Solution Section */}
-        <section className="py-24 px-6">
-          <div className="max-w-7xl mx-auto">
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-12 items-center">
-              <div className="lg:col-span-5 parallax-layer" data-speed="-0.05">
-                <h2 className="text-3xl md:text-4xl text-white font-bold leading-tight mb-6">
+        {/* Section 2: Problem/Solution Section */}
+        <section 
+          id="problem"
+          className="h-screen w-full shrink-0 snap-start flex items-center justify-center py-12 lg:py-0 px-6 relative overflow-hidden"
+        >
+          {/* Section Indicator Label */}
+          <div className="absolute top-24 left-12 font-mono text-[10px] text-[#4edea3]/50 uppercase tracking-widest hidden lg:block">
+            02 // THE CHALLENGE
+          </div>
+          
+          <div className="max-w-7xl mx-auto w-full relative z-10 flex flex-col justify-center h-full">
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-12 items-center">
+              <div className="lg:col-span-5 parallax-layer" data-speed="-0.03">
+                <h2 className="text-2xl md:text-4xl text-white font-bold leading-tight mb-4">
                   Spreadsheets are the backbone of business, but they're <span className="text-[#ffb4ab]">broken</span>.
                 </h2>
-                <p className="text-[#bbcabf] mb-8 leading-relaxed">
+                <p className="text-xs md:text-sm text-[#bbcabf] mb-6 leading-relaxed">
                   Legacy tools weren't built for the scale and complexity of today's data. Manual cleaning takes hours. Complex formulas are prone to error. Insights remain hidden behind technical barriers.
                 </p>
-                <div className="space-y-4">
-                  <div className="flex items-start gap-4 p-4 glass-card rounded-xl">
+                <div className="space-y-3">
+                  <div className="flex items-start gap-4 p-3.5 glass-card rounded-xl">
                     <TimerOff className="size-5 text-[#ffb4ab] shrink-0 mt-0.5" />
                     <div>
-                      <h4 className="font-bold text-white text-sm md:text-base">60% Time Wasted</h4>
-                      <p className="text-xs text-[#bbcabf] mt-1">Analysts spend most of their time cleaning data rather than analyzing it.</p>
+                      <h4 className="font-bold text-white text-xs md:text-sm">60% Time Wasted</h4>
+                      <p className="text-[11px] text-[#bbcabf] mt-0.5">Analysts spend most of their time cleaning data rather than analyzing it.</p>
                     </div>
                   </div>
-                  <div className="flex items-start gap-4 p-4 glass-card rounded-xl">
+                  <div className="flex items-start gap-4 p-3.5 glass-card rounded-xl">
                     <AlertCircle className="size-5 text-[#ffb4ab] shrink-0 mt-0.5" />
                     <div>
-                      <h4 className="font-bold text-white text-sm md:text-base">Formula Fatigue</h4>
-                      <p className="text-xs text-[#bbcabf] mt-1">One misplaced comma in a nested IF statement can break entire models.</p>
+                      <h4 className="font-bold text-white text-xs md:text-sm">Formula Fatigue</h4>
+                      <p className="text-[11px] text-[#bbcabf] mt-0.5">One misplaced comma in a nested IF statement can break entire models.</p>
                     </div>
                   </div>
                 </div>
               </div>
-              <div className="lg:col-span-7 grid grid-cols-1 sm:grid-cols-2 gap-6 parallax-layer" data-speed="0.05">
-                <div className="glass-card p-6 rounded-2xl border-[#4edea3]/30 bg-[#4edea3]/5 hover-lift">
-                  <div className="w-12 h-12 bg-[#4edea3]/20 rounded-lg flex items-center justify-center mb-6">
-                    <Zap className="size-6 text-[#4edea3]" />
+              
+              <div className="lg:col-span-7 grid grid-cols-1 sm:grid-cols-2 gap-4 lg:gap-6 parallax-layer" data-speed="0.03">
+                <div className="glass-card p-5 rounded-2xl border-[#4edea3]/30 bg-[#4edea3]/5 hover-lift">
+                  <div className="w-10 h-10 bg-[#4edea3]/20 rounded-lg flex items-center justify-center mb-4">
+                    <Zap className="size-5 text-[#4edea3]" />
                   </div>
-                  <h3 className="text-lg font-bold text-[#4edea3] mb-2">Instant Execution</h3>
-                  <p className="text-xs text-[#bbcabf] leading-relaxed">Processes millions of rows in milliseconds using optimized WebGL acceleration.</p>
+                  <h3 className="text-base font-bold text-[#4edea3] mb-1.5">Instant Execution</h3>
+                  <p className="text-[11px] text-[#bbcabf] leading-relaxed">Processes millions of rows in milliseconds using optimized WebGL acceleration.</p>
                 </div>
-                <div className="glass-card p-6 rounded-2xl hover-lift">
-                  <div className="w-12 h-12 bg-[#0566d9]/20 rounded-lg flex items-center justify-center mb-6">
-                    <Brain className="size-6 text-[#adc6ff]" />
+                
+                <div className="glass-card p-5 rounded-2xl hover-lift">
+                  <div className="w-10 h-10 bg-[#0566d9]/20 rounded-lg flex items-center justify-center mb-4">
+                    <Brain className="size-5 text-[#adc6ff]" />
                   </div>
-                  <h3 className="text-lg font-bold text-white mb-2">Neural Mapping</h3>
-                  <p className="text-xs text-[#bbcabf] leading-relaxed">Understands the semantic context of your headers and values automatically.</p>
+                  <h3 className="text-base font-bold text-white mb-1.5">Neural Mapping</h3>
+                  <p className="text-[11px] text-[#bbcabf] leading-relaxed">Understands the semantic context of your headers and values automatically.</p>
                 </div>
-                <div className="sm:col-span-2 glass-card p-6 rounded-2xl flex flex-col sm:flex-row items-center gap-6 hover-lift">
-                  <div className="w-16 h-16 bg-[#71af97]/20 rounded-full flex items-center justify-center shrink-0">
-                    <Bot className="size-8 text-[#95d3ba]" />
+                
+                <div className="sm:col-span-2 glass-card p-5 rounded-2xl flex flex-col sm:flex-row items-center gap-5 hover-lift">
+                  <div className="w-14 h-14 bg-[#71af97]/20 rounded-full flex items-center justify-center shrink-0">
+                    <Bot className="size-7 text-[#95d3ba]" />
                   </div>
                   <div>
-                    <h3 className="text-lg font-bold text-white mb-2">Autonomous Agency</h3>
-                    <p className="text-xs text-[#bbcabf] leading-relaxed">
+                    <h3 className="text-base font-bold text-white mb-1.5">Autonomous Agency</h3>
+                    <p className="text-[11px] text-[#bbcabf] leading-relaxed">
                       DataPilot doesn't just suggest—it acts. Assign complex multi-step workflows and watch them complete in real-time with full transparency.
                     </p>
                   </div>
@@ -406,29 +496,41 @@ export default function LandingPage() {
               </div>
             </div>
           </div>
+          
+          {/* Glowing Separator Line */}
+          <div className="absolute bottom-0 left-0 right-0 h-[1px] bg-gradient-to-r from-transparent via-[#4edea3]/30 to-transparent"></div>
         </section>
 
-        {/* Core Features - Bento Grid */}
-        <section className="py-24 px-6 bg-[#060e20]/50">
-          <div className="max-w-7xl mx-auto">
-            <div className="text-center mb-16">
-              <h2 className="text-3xl md:text-4xl text-white font-bold mb-2">The Power of a Data Team in One Agent</h2>
-              <p className="text-sm text-[#bbcabf] max-w-xl mx-auto">Built for the high-stakes world of enterprise finance and operations.</p>
+        {/* Section 3: Core Features - Bento Grid Section */}
+        <section 
+          id="features"
+          className="h-screen w-full shrink-0 snap-start flex items-center justify-center py-12 lg:py-0 px-6 bg-[#060e20]/50 relative overflow-hidden"
+        >
+          {/* Section Indicator Label */}
+          <div className="absolute top-24 left-12 font-mono text-[10px] text-[#4edea3]/50 uppercase tracking-widest hidden lg:block">
+            03 // CORE CAPABILITIES
+          </div>
+
+          <div className="max-w-7xl mx-auto w-full relative z-10 flex flex-col justify-center h-full">
+            <div className="text-center mb-6 lg:mb-8">
+              <h2 className="text-2xl md:text-4xl text-white font-bold mb-2">The Power of a Data Team in One Agent</h2>
+              <p className="text-xs md:text-sm text-[#bbcabf] max-w-xl mx-auto">Built for the high-stakes world of enterprise finance and operations.</p>
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-5 max-w-6xl mx-auto w-full">
               {/* Feature 1: Smart Clean */}
-              <div className="glass-card p-6 rounded-2xl flex flex-col justify-between group hover:ai-glow transition-all duration-500 min-h-[320px]">
+              <div className="glass-card p-5 rounded-2xl flex flex-col justify-between group hover:ai-glow transition-all duration-500 min-h-[250px] lg:min-h-[280px]">
                 <div>
-                  <div className="flex justify-between items-start mb-10">
+                  <div className="flex justify-between items-start mb-4">
                     <div className="p-2 bg-[#2d3449] rounded-lg">
-                      <Brush className="size-5 text-[#4edea3]" />
+                      <Brush className="size-4 text-[#4edea3]" />
                     </div>
-                    <span className="text-[10px] font-mono text-[#10b981]/60 font-semibold tracking-wider">DP-MODULE-01</span>
+                    <span className="text-[9px] font-mono text-[#10b981]/60 font-semibold tracking-wider">DP-MODULE-01</span>
                   </div>
-                  <h3 className="text-lg font-bold text-white mb-3">Smart Clean</h3>
-                  <p className="text-xs text-[#bbcabf] leading-relaxed">Remove duplicates, fix formatting, and standardize inputs with one click. Our AI recognizes inconsistent date formats and typos across 50+ languages.</p>
+                  <h3 className="text-base font-bold text-white mb-2">Smart Clean</h3>
+                  <p className="text-[11px] text-[#bbcabf] leading-relaxed">Remove duplicates, fix formatting, and standardize inputs. AI recognizes inconsistent dates and typos across 50+ languages.</p>
                 </div>
-                <div className="mt-6 p-3.5 bg-[#0b1326]/50 rounded-lg border border-[#3c4a42]/30 font-mono text-[10px] overflow-hidden space-y-1">
+                <div className="mt-4 p-2.5 bg-[#0b1326]/50 rounded-lg border border-[#3c4a42]/30 font-mono text-[9px] overflow-hidden space-y-1">
                   <div className="flex gap-2 text-[#4edea3]">
                     <span>[AI]</span> <span>Analyzing column 'Date'...</span>
                   </div>
@@ -439,20 +541,23 @@ export default function LandingPage() {
               </div>
 
               {/* Feature 2: Insight Engine */}
-              <div className="glass-card p-6 rounded-2xl flex flex-col justify-between group hover:ai-glow transition-all duration-500 min-h-[380px]">
-                <div className="h-full flex flex-col">
-                  <div className="flex justify-between items-start mb-10">
-                    <div className="p-2 bg-[#2d3449] rounded-lg">
-                      <Activity className="size-5 text-[#adc6ff]" />
+              <div className="glass-card p-5 rounded-2xl flex flex-col justify-between group hover:ai-glow transition-all duration-500 min-h-[290px] lg:min-h-[320px]">
+                <div className="h-full flex flex-col justify-between">
+                  <div>
+                    <div className="flex justify-between items-start mb-4">
+                      <div className="p-2 bg-[#2d3449] rounded-lg">
+                        <Activity className="size-4 text-[#adc6ff]" />
+                      </div>
+                      <span className="text-[9px] font-mono text-[#adc6ff]/60 font-semibold tracking-wider">DP-CORE-X</span>
                     </div>
-                    <span className="text-[10px] font-mono text-[#adc6ff]/60 font-semibold tracking-wider">DP-CORE-X</span>
+                    <h3 className="text-base font-bold text-white mb-2">Insight Engine</h3>
+                    <p className="text-[11px] text-[#bbcabf] leading-relaxed">Ask questions in plain English: "Show me the correlation between regional sales and marketing spend for Q3."</p>
                   </div>
-                  <h3 className="text-lg font-bold text-white mb-3">Insight Engine</h3>
-                  <p className="text-xs text-[#bbcabf] leading-relaxed mb-6">Ask questions in plain English, get instant visualizations. "Show me the correlation between regional sales and marketing spend for Q3."</p>
-                  <div className="mt-auto relative space-y-4">
-                    <div className="p-4 bg-[#222a3d] rounded-xl border border-[#3c4a42]/50">
-                      <div className="text-xs text-[#bbcabf] italic mb-3">"Compare growth vs LY"</div>
-                      <div className="h-28 w-full bg-gradient-to-tr from-[#4edea3]/10 to-[#adc6ff]/10 rounded-lg flex items-end justify-between p-2 gap-1.5">
+                  
+                  <div className="mt-4 relative space-y-3">
+                    <div className="p-3 bg-[#222a3d] rounded-xl border border-[#3c4a42]/50">
+                      <div className="text-[9px] text-[#bbcabf] italic mb-2">"Compare growth vs LY"</div>
+                      <div className="h-16 w-full bg-gradient-to-tr from-[#4edea3]/10 to-[#adc6ff]/10 rounded-lg flex items-end justify-between p-1.5 gap-1">
                         <div className="bg-[#4edea3]/40 w-1/6 h-[40%] rounded-sm"></div>
                         <div className="bg-[#4edea3]/40 w-1/6 h-[60%] rounded-sm"></div>
                         <div className="bg-[#4edea3]/40 w-1/6 h-[55%] rounded-sm"></div>
@@ -461,96 +566,110 @@ export default function LandingPage() {
                         <div className="bg-[#adc6ff]/40 w-1/6 h-[45%] rounded-sm"></div>
                       </div>
                     </div>
-                    <div className="flex flex-wrap gap-1.5">
-                      <span className="px-2 py-0.5 bg-[#adc6ff]/10 text-[#adc6ff] text-[9px] rounded border border-[#adc6ff]/20 font-semibold">Trend Analysis</span>
-                      <span className="px-2 py-0.5 bg-[#adc6ff]/10 text-[#adc6ff] text-[9px] rounded border border-[#adc6ff]/20 font-semibold">Pivot Gen</span>
-                      <span className="px-2 py-0.5 bg-[#adc6ff]/10 text-[#adc6ff] text-[9px] rounded border border-[#adc6ff]/20 font-semibold">Anomaly Detect</span>
+                    <div className="flex flex-wrap gap-1">
+                      <span className="px-1.5 py-0.5 bg-[#adc6ff]/10 text-[#adc6ff] text-[8px] rounded border border-[#adc6ff]/20 font-semibold">Trend Analysis</span>
+                      <span className="px-1.5 py-0.5 bg-[#adc6ff]/10 text-[#adc6ff] text-[8px] rounded border border-[#adc6ff]/20 font-semibold">Pivot Gen</span>
+                      <span className="px-1.5 py-0.5 bg-[#adc6ff]/10 text-[#adc6ff] text-[8px] rounded border border-[#adc6ff]/20 font-semibold">Anomaly Detect</span>
                     </div>
                   </div>
                 </div>
               </div>
 
               {/* Feature 3: Formula Architect */}
-              <div className="glass-card p-6 rounded-2xl flex flex-col justify-between group hover:ai-glow transition-all duration-500 min-h-[320px]">
+              <div className="glass-card p-5 rounded-2xl flex flex-col justify-between group hover:ai-glow transition-all duration-500 min-h-[250px] lg:min-h-[280px]">
                 <div>
-                  <div className="flex justify-between items-start mb-10">
+                  <div className="flex justify-between items-start mb-4">
                     <div className="p-2 bg-[#2d3449] rounded-lg">
-                      <Binary className="size-5 text-[#95d3ba]" />
+                      <Binary className="size-4 text-[#95d3ba]" />
                     </div>
-                    <span className="text-[10px] font-mono text-[#95d3ba]/60 font-semibold tracking-wider">DP-BUILD-42</span>
+                    <span className="text-[9px] font-mono text-[#95d3ba]/60 font-semibold tracking-wider">DP-BUILD-42</span>
                   </div>
-                  <h3 className="text-lg font-bold text-white mb-3">Formula Architect</h3>
-                  <p className="text-xs text-[#bbcabf] leading-relaxed">Never write a complex nested IF or VLOOKUP again. Describe the logic, and DataPilot generates the optimized, error-free syntax.</p>
+                  <h3 className="text-base font-bold text-white mb-2">Formula Architect</h3>
+                  <p className="text-[11px] text-[#bbcabf] leading-relaxed">Never write a complex nested IF or VLOOKUP again. Describe the logic, and DataPilot generates the optimized syntax.</p>
                 </div>
-                <div className="mt-6 font-mono text-[10px] text-[#95d3ba] p-3 bg-[#95d3ba]/5 rounded-lg border border-[#95d3ba]/25 overflow-x-auto">
+                <div className="mt-4 font-mono text-[9px] text-[#95d3ba] p-2.5 bg-[#95d3ba]/5 rounded-lg border border-[#95d3ba]/25 overflow-x-auto">
                   =IF(AND(A2&gt;100, B2="Tier 1"), C2*1.15, C2*0.95)
                 </div>
               </div>
 
               {/* Feature 4: Integration (Wide) */}
-              <div className="md:col-span-2 glass-card p-6 rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-6 hover:ai-glow transition-all duration-500 min-h-[160px]">
+              <div className="md:col-span-2 glass-card p-5 rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-4 hover:ai-glow transition-all duration-500 min-h-[90px] lg:min-h-[110px]">
                 <div className="flex-1">
-                  <h3 className="text-lg font-bold text-white mb-2">Seamless Ecosystem</h3>
-                  <p className="text-xs text-[#bbcabf] leading-relaxed">DataPilot connects directly to your existing tech stack. Export to Excel, Google Sheets, or stream live data via API connectors. No new software to learn.</p>
+                  <h3 className="text-base font-bold text-white mb-1">Seamless Ecosystem</h3>
+                  <p className="text-[11px] text-[#bbcabf] leading-relaxed">Connects to your tech stack. Export to Excel, Google Sheets, or stream live data via API. No new software to learn.</p>
                 </div>
                 <div className="flex -space-x-3 shrink-0">
-                  <div className="w-12 h-12 rounded-full bg-[#222a3d] border-2 border-[#3c4a42] flex items-center justify-center shadow-lg">
-                    <Table2 className="size-5 text-[#4edea3]" />
+                  <div className="w-10 h-10 rounded-full bg-[#222a3d] border-2 border-[#3c4a42] flex items-center justify-center shadow-lg">
+                    <Table2 className="size-4 text-[#4edea3]" />
                   </div>
-                  <div className="w-12 h-12 rounded-full bg-[#222a3d] border-2 border-[#3c4a42] flex items-center justify-center shadow-lg">
-                    <CloudSync className="size-5 text-[#10b981]" />
+                  <div className="w-10 h-10 rounded-full bg-[#222a3d] border-2 border-[#3c4a42] flex items-center justify-center shadow-lg">
+                    <CloudSync className="size-4 text-[#10b981]" />
                   </div>
-                  <div className="w-12 h-12 rounded-full bg-[#222a3d] border-2 border-[#3c4a42] flex items-center justify-center shadow-lg">
-                    <Database className="size-5 text-[#adc6ff]" />
+                  <div className="w-10 h-10 rounded-full bg-[#222a3d] border-2 border-[#3c4a42] flex items-center justify-center shadow-lg">
+                    <Database className="size-4 text-[#adc6ff]" />
                   </div>
                 </div>
               </div>
             </div>
           </div>
+          
+          {/* Glowing Separator Line */}
+          <div className="absolute bottom-0 left-0 right-0 h-[1px] bg-gradient-to-r from-transparent via-[#4edea3]/30 to-transparent"></div>
         </section>
 
-        {/* CTA Section */}
-        <section className="py-24 px-6 relative overflow-hidden">
-          <div className="max-w-5xl mx-auto glass-card p-10 md:p-20 rounded-[40px] text-center relative z-10 ai-glow">
-            <div className="absolute -top-10 -left-10 w-40 h-40 bg-[#4edea3]/20 blur-[100px] rounded-full"></div>
-            <div className="absolute -bottom-10 -right-10 w-40 h-40 bg-[#adc6ff]/20 blur-[100px] rounded-full"></div>
-            <h2 className="text-4xl md:text-5xl text-white mb-6 font-bold tracking-tight">
-              Ready to outpace the <br/><span className="text-[#4edea3] underline decoration-[#4edea3]/30">manual age?</span>
-            </h2>
-            <p className="text-base md:text-lg text-[#bbcabf] mb-10 max-w-2xl mx-auto leading-relaxed">Join 10,000+ analysts who have reclaimed 20 hours a week with DataPilot.</p>
-            <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
-              <Link href="/dashboard" className="w-full sm:w-auto bg-[#4edea3] text-[#003824] px-8 py-4 rounded-xl text-sm font-bold shadow-[0_0_40px_rgba(78,222,163,0.4)] hover:shadow-[0_0_60px_rgba(78,222,163,0.6)] transition-all active:scale-95 text-center">Start Your Free Trial</Link>
-              <div className="flex items-center gap-2 mt-4 sm:mt-0 text-[11px] text-[#bbcabf] font-mono">
-                <ShieldCheck className="size-4 text-[#4edea3]" />
-                No credit card required
+        {/* Section 4: CTA + Footer Page Section */}
+        <section 
+          id="cta"
+          className="h-screen w-full shrink-0 snap-start flex flex-col justify-between pt-24 pb-6 px-6 relative overflow-hidden"
+        >
+          {/* Section Indicator Label */}
+          <div className="absolute top-24 left-12 font-mono text-[10px] text-[#4edea3]/50 uppercase tracking-widest hidden lg:block">
+            04 // GET STARTED
+          </div>
+
+          {/* CTA Box */}
+          <div className="flex-1 flex items-center justify-center w-full">
+            <div className="max-w-4xl w-full glass-card p-8 md:p-10 rounded-[40px] text-center relative z-10 ai-glow">
+              <div className="absolute -top-10 -left-10 w-40 h-40 bg-[#4edea3]/20 blur-[100px] rounded-full"></div>
+              <div className="absolute -bottom-10 -right-10 w-40 h-40 bg-[#adc6ff]/20 blur-[100px] rounded-full"></div>
+              <h2 className="text-3xl md:text-5xl text-white mb-4 font-bold tracking-tight">
+                Ready to outpace the <br/><span className="text-[#4edea3] underline decoration-[#4edea3]/30">manual age?</span>
+              </h2>
+              <p className="text-xs md:text-base text-[#bbcabf] mb-8 max-w-xl mx-auto leading-relaxed">Join 10,000+ analysts who have reclaimed 20 hours a week with DataPilot.</p>
+              <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
+                <Link href="/dashboard" className="w-full sm:w-auto bg-[#4edea3] text-[#003824] px-8 py-3.5 rounded-xl text-sm font-bold shadow-[0_0_40px_rgba(78,222,163,0.4)] hover:shadow-[0_0_60px_rgba(78,222,163,0.6)] transition-all active:scale-95 text-center">Start Your Free Trial</Link>
+                <div className="flex items-center gap-2 mt-4 sm:mt-0 text-[10px] text-[#bbcabf] font-mono">
+                  <ShieldCheck className="size-4 text-[#4edea3]" />
+                  No credit card required
+                </div>
               </div>
             </div>
           </div>
-        </section>
 
-        {/* Footer */}
-        <footer className="bg-[#060e20] border-t border-[#3c4a42]/30 py-16">
-          <div className="flex flex-col md:flex-row justify-between items-center px-6 w-full max-w-7xl mx-auto gap-8">
-            <div className="flex flex-col items-center md:items-start gap-1.5">
-              <span className="font-extrabold text-2xl text-[#4edea3]">DataPilot</span>
-              <p className="text-[11px] text-[#bbcabf]">© 2024 DataPilot AI. All rights reserved.</p>
-            </div>
-            <div className="flex flex-wrap justify-center gap-6 md:gap-10">
-              <a className="text-[11px] text-[#bbcabf] hover:text-[#4edea3] transition-colors" href="#">Privacy Policy</a>
-              <a className="text-[11px] text-[#bbcabf] hover:text-[#4edea3] transition-colors" href="#">Terms of Service</a>
-              <a className="text-[11px] text-[#bbcabf] hover:text-[#4edea3] transition-colors" href="#">Security</a>
-              <a className="text-[11px] text-[#bbcabf] hover:text-[#4edea3] transition-colors" href="#">Contact Support</a>
-            </div>
-            <div className="flex gap-4">
-              <div className="w-8 h-8 rounded-full glass-card flex items-center justify-center cursor-pointer hover:bg-[#4edea3]/10 hover:text-[#4edea3] transition-all">
-                <Share2 className="size-4" />
+          {/* Footer aligned bottom */}
+          <footer className="w-full max-w-7xl mx-auto mt-4 pt-4 border-t border-[#3c4a42]/30">
+            <div className="flex flex-col md:flex-row justify-between items-center gap-4">
+              <div className="flex flex-col items-center md:items-start gap-1">
+                <span className="font-extrabold text-xl text-[#4edea3]">DataPilot</span>
+                <p className="text-[10px] text-[#bbcabf]">© 2026 DataPilot AI. All rights reserved.</p>
               </div>
-              <div className="w-8 h-8 rounded-full glass-card flex items-center justify-center cursor-pointer hover:bg-[#4edea3]/10 hover:text-[#4edea3] transition-all">
-                <Globe className="size-4" />
+              <div className="flex flex-wrap justify-center gap-4 md:gap-8">
+                <a className="text-[10px] text-[#bbcabf] hover:text-[#4edea3] transition-colors" href="#">Privacy Policy</a>
+                <a className="text-[10px] text-[#bbcabf] hover:text-[#4edea3] transition-colors" href="#">Terms of Service</a>
+                <a className="text-[10px] text-[#bbcabf] hover:text-[#4edea3] transition-colors" href="#">Security</a>
+                <a className="text-[10px] text-[#bbcabf] hover:text-[#4edea3] transition-colors" href="#">Contact Support</a>
+              </div>
+              <div className="flex gap-3">
+                <div className="w-7 h-7 rounded-full glass-card flex items-center justify-center cursor-pointer hover:bg-[#4edea3]/10 hover:text-[#4edea3] transition-all">
+                  <Share2 className="size-3.5" />
+                </div>
+                <div className="w-7 h-7 rounded-full glass-card flex items-center justify-center cursor-pointer hover:bg-[#4edea3]/10 hover:text-[#4edea3] transition-all">
+                  <Globe className="size-3.5" />
+                </div>
               </div>
             </div>
-          </div>
-        </footer>
+          </footer>
+        </section>
       </main>
     </div>
   )
