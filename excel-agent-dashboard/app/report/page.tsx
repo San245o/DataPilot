@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState, useMemo, useCallback } from "react"
+import { useEffect, useState, useMemo, useCallback, useRef } from "react"
 import { useRouter } from "next/navigation"
 import Link from "next/link"
 import {
@@ -127,6 +127,147 @@ function parseInlineMarkdown(text: string) {
 
 export default function ReportPage() {
   const router = useRouter()
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+
+  // WebGL Shader Background Logic
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+
+    const gl = (canvas.getContext("webgl") || canvas.getContext("experimental-webgl")) as any
+    if (!gl) return
+
+    const vs = `
+      attribute vec2 a_position;
+      varying vec2 v_texCoord;
+      void main() {
+        v_texCoord = a_position * 0.5 + 0.5;
+        gl_Position = vec4(a_position, 0.0, 1.0);
+      }
+    `
+
+    const fs = `
+      precision highp float;
+      uniform float u_time;
+      uniform vec2 u_resolution;
+      uniform vec2 u_mouse;
+      varying vec2 v_texCoord;
+
+      void main() {
+          vec2 uv = v_texCoord;
+          vec2 mouse = u_mouse / u_resolution;
+          
+          // Parallax effect based on mouse and time
+          vec2 shiftedUv = uv + mouse * 0.02;
+          
+          // Create a scrolling grid pattern
+          vec2 gridUv = shiftedUv * 20.0;
+          gridUv.y += u_time * 0.2;
+          
+          vec2 grid = abs(fract(gridUv - 0.5) - 0.5) / fwidth(gridUv);
+          float line = min(grid.x, grid.y);
+          float gridPattern = 1.0 - min(line, 1.0);
+          
+          // Background glow
+          float glow = distance(uv, vec2(0.5) + mouse * 0.1);
+          vec3 color = mix(vec3(0.02, 0.05, 0.1), vec3(0.06, 0.1, 0.15), 1.0 - glow);
+          
+          // Add the grid in a subtle way
+          color += gridPattern * vec3(0.06, 0.72, 0.5) * 0.15;
+          
+          // Add "data stream" particles
+          float particle = sin(uv.x * 50.0 + u_time * 2.0) * cos(uv.y * 30.0 - u_time * 1.5);
+          color += smoothstep(0.98, 1.0, particle) * vec3(0.4, 0.9, 1.0) * 0.3;
+
+          gl_FragColor = vec4(color, 1.0);
+      }
+    `
+
+    const compileShader = (type: number, src: string) => {
+      const shader = gl.createShader(type)
+      if (!shader) return null
+      gl.shaderSource(shader, src)
+      gl.compileShader(shader)
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        console.error(gl.getShaderInfoLog(shader))
+        gl.deleteShader(shader)
+        return null
+      }
+      return shader
+    }
+
+    const vertexShader = compileShader(gl.VERTEX_SHADER, vs)
+    const fragmentShader = compileShader(gl.FRAGMENT_SHADER, fs)
+    if (!vertexShader || !fragmentShader) return
+
+    const prog = gl.createProgram()
+    if (!prog) return
+    gl.attachShader(prog, vertexShader)
+    gl.attachShader(prog, fragmentShader)
+    gl.linkProgram(prog)
+    gl.useProgram(prog)
+
+    const buf = gl.createBuffer()
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf)
+    gl.bufferData(
+      gl.ARRAY_BUFFER,
+      new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]),
+      gl.STATIC_DRAW
+    )
+
+    const pos = gl.getAttribLocation(prog, "a_position")
+    gl.enableVertexAttribArray(pos)
+    gl.vertexAttribPointer(pos, 2, gl.FLOAT, false, 0, 0)
+
+    const uTime = gl.getUniformLocation(prog, "u_time")
+    const uRes = gl.getUniformLocation(prog, "u_resolution")
+    const uMouse = gl.getUniformLocation(prog, "u_mouse")
+
+    let mouse = { x: canvas.width / 2, y: canvas.height / 2 }
+
+    const handleMouseMove = (event: MouseEvent) => {
+      const rect = canvas.getBoundingClientRect()
+      if (rect.width && rect.height) {
+        const nx = (event.clientX - rect.left) / rect.width
+        const ny = 1.0 - (event.clientY - rect.top) / rect.height
+        mouse.x = nx * canvas.width
+        mouse.y = ny * canvas.height
+      }
+    }
+
+    window.addEventListener("mousemove", handleMouseMove)
+
+    const syncSize = () => {
+      const w = canvas.clientWidth || 1280
+      const h = canvas.clientHeight || 720
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w
+        canvas.height = h
+      }
+    }
+
+    syncSize()
+    window.addEventListener("resize", syncSize)
+
+    let reqId = 0
+    const render = (t: number) => {
+      gl.viewport(0, 0, canvas.width, canvas.height)
+      if (uTime) gl.uniform1f(uTime, t * 0.001)
+      if (uRes) gl.uniform2f(uRes, canvas.width, canvas.height)
+      if (uMouse) gl.uniform2f(uMouse, mouse.x, mouse.y)
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
+      reqId = requestAnimationFrame(render)
+    }
+
+    reqId = requestAnimationFrame(render)
+
+    return () => {
+      cancelAnimationFrame(reqId)
+      window.removeEventListener("mousemove", handleMouseMove)
+      window.removeEventListener("resize", syncSize)
+    }
+  }, [])
+
   const [dataset, setDataset] = useState<SavedDataset | null>(null)
   const [reportHtml, setReportHtml] = useState<string>("")
   const [reportMarkdown, setReportMarkdown] = useState<string>("")
@@ -336,6 +477,24 @@ Crucial: In your planning step, you MUST generate at least one high-quality Plot
             color: #334155 !important;
           }
         }
+        .data-grid-overlay {
+          background-image: radial-gradient(#1e293b 1px, transparent 1px);
+          background-size: 24px 24px;
+          opacity: 0.2;
+        }
+        .pulse-dot {
+          width: 8px;
+          height: 8px;
+          background: #4edea3;
+          border-radius: 50%;
+          display: inline-block;
+          animation: pulse-kf 2s infinite;
+        }
+        @keyframes pulse-kf {
+          0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(78, 222, 163, 0.7); }
+          70% { transform: scale(1); box-shadow: 0 0 0 10px rgba(78, 222, 163, 0); }
+          100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(78, 222, 163, 0); }
+        }
       `}</style>
 
       {/* Header */}
@@ -381,7 +540,7 @@ Crucial: In your planning step, you MUST generate at least one high-quality Plot
       </header>
 
       {/* Main Layout */}
-      <main className="flex-1 max-w-5xl w-full mx-auto p-4 md:p-8 space-y-8 print-card">
+      <main className="flex-1 max-w-[1400px] w-full mx-auto p-4 md:p-8 space-y-8 print-card relative z-10">
         {!dataset ? (
           <div className="no-print flex flex-col items-center justify-center py-20 text-center space-y-4">
             <div className="p-4 rounded-full bg-slate-900 border border-slate-800 text-amber-500 animate-bounce">
@@ -402,7 +561,7 @@ Crucial: In your planning step, you MUST generate at least one high-quality Plot
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 print-card">
             {/* Sidebar Controls & Running Traces */}
-            <div className="no-print lg:col-span-4 space-y-6">
+            <div className="no-print lg:col-span-3 space-y-6">
               {/* Dataset Details Card */}
               <div className="rounded-2xl border border-slate-800/80 bg-slate-900/40 backdrop-blur-md p-5 space-y-4">
                 <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
@@ -509,7 +668,7 @@ Crucial: In your planning step, you MUST generate at least one high-quality Plot
             </div>
 
             {/* Generated Report Output Panel */}
-            <div className={`lg:col-span-${isRunning || thinkingTrace.length > 0 ? "8" : "12"} print-card`}>
+            <div className={`${(isRunning || thinkingTrace.length > 0) ? "lg:col-span-9" : "lg:col-span-12"} print-card`}>
               <div className="rounded-3xl border border-slate-800/80 bg-slate-900/20 backdrop-blur-md p-6 md:p-10 shadow-2xl min-h-[400px] space-y-8 print-card">
                 
                 {/* Generation Loading State overlay if running and no output yet */}
@@ -631,6 +790,14 @@ Crucial: In your planning step, you MUST generate at least one high-quality Plot
           </div>
         )}
       </main>
+
+      {/* Global Background Shader */}
+      <div className="fixed inset-0 z-0 pointer-events-none no-print">
+        <div className="w-full h-full opacity-40">
+          <canvas ref={canvasRef} className="block w-full h-full"></canvas>
+        </div>
+        <div className="absolute inset-0 data-grid-overlay"></div>
+      </div>
     </div>
   )
 }
