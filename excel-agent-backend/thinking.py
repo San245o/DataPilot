@@ -41,6 +41,7 @@ TOOL_GUIDE = """Available tools:
 - highlight_columns: {"columns": ["Status", "Priority"]}
 - table_to_csv: {"max_rows": 100}
 - execute_python: {"code": "python code using df plus helpers"}
+- web_search: {"query": "search query to lookup facts/data outside the dataset"}
 
 Inside execute_python you may use the full sandbox environment:
 df (active dataset), dfs (selected datasets by id and readable name), pd(pandas),np(numpy), math, px, go, make_subplots, re, unicodedata, DO NOT IMPORT
@@ -94,6 +95,7 @@ The helper behavior is strict, so follow these exact contracts:
  - Use to_numeric_clean(...) when numeric fields may contain symbols or mixed text.
  - For simple non-ASCII checks, prefer string methods like value.isascii() when possible, but standard harmless builtins such as ord(...) plus math and unicodedata are also available.
  - For count, how many, total number, sum, average, minimum, and maximum questions, execute the calculation and surface the real result with log_output(...) or print(...).
+- web_search is for looking up information, details, math constants, or external facts not present in the dataset context.
 - Never delete rows unless the user explicitly asked to delete, drop, remove, or deduplicate rows.
 - When a tool fails, acknowledge the failure briefly in thought and choose a corrected next action.
 
@@ -1008,6 +1010,96 @@ def _execute_schema_tool(
     )
 
 
+def _execute_web_search_tool(rows: list[dict[str, Any]], args: dict[str, Any]) -> ToolExecution:
+    import os
+    import urllib.request
+    import urllib.error
+
+    query = str(args.get("query") or "").strip()
+    if not query:
+        return ToolExecution(
+            rows=rows,
+            visualization=None,
+            query_output=None,
+            query_table_rows=None,
+            mutation=False,
+            highlight_indices=[],
+            highlighted_columns=[],
+            observation="Web search query is empty.",
+            raw_observation="Web search query is empty.",
+            code="web_search(query='')",
+            error="Empty query error",
+        )
+
+    api_key = os.getenv("TAVILY_API_KEY") or "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"
+    url = "https://api.tavily.com/search"
+    headers = {"Content-Type": "application/json"}
+    data = {
+        "api_key": api_key,
+        "query": query,
+        "include_answer": True,
+        "max_results": 5
+    }
+
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(data).encode("utf-8"),
+        headers=headers,
+        method="POST"
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=12) as response:
+            res_body = response.read().decode("utf-8")
+            res_json = json.loads(res_body)
+
+            answer = res_json.get("answer")
+            results = res_json.get("results") or []
+
+            obs_parts = []
+            if answer:
+                obs_parts.append(f"Tavily Answer: {answer}")
+
+            for i, r in enumerate(results, 1):
+                title = r.get("title", "No Title")
+                url_str = r.get("url", "No URL")
+                content = r.get("content", "No Content")
+                obs_parts.append(f"Result {i}: {title} ({url_str})\nSummary: {content}")
+
+            observation = "\n\n".join(obs_parts)
+            if not observation:
+                observation = "No search results found."
+
+            return ToolExecution(
+                rows=rows,
+                visualization=None,
+                query_output=None,
+                query_table_rows=None,
+                mutation=False,
+                highlight_indices=[],
+                highlighted_columns=[],
+                observation=_truncate(observation, 800),
+                raw_observation=_truncate(json.dumps(res_json), MAX_OBSERVATION_CHARS),
+                code=f"web_search(query={repr(query)})",
+                error=None,
+            )
+    except Exception as e:
+        err_msg = str(e)
+        return ToolExecution(
+            rows=rows,
+            visualization=None,
+            query_output=None,
+            query_table_rows=None,
+            mutation=False,
+            highlight_indices=[],
+            highlighted_columns=[],
+            observation=f"Tavily web search failed with: {err_msg}",
+            raw_observation=f"Tavily web search failed with: {err_msg}",
+            code=f"web_search(query={repr(query)})",
+            error=err_msg,
+        )
+
+
 def _execute_sandbox_tool(
     *,
     tool: str,
@@ -1272,6 +1364,8 @@ def _run_react_thinking_agent(
 
         if tool == "inspect_schema":
             execution = _execute_schema_tool(working_rows, args, datasets=datasets)
+        elif tool == "web_search":
+            execution = _execute_web_search_tool(working_rows, args)
         else:
             try:
                 execution = _execute_sandbox_tool(
@@ -1570,6 +1664,8 @@ def run_thinking_agent(
 
         if tool == "inspect_schema":
             execution = _execute_schema_tool(working_rows, args, datasets=datasets)
+        elif tool == "web_search":
+            execution = _execute_web_search_tool(working_rows, args)
         else:
             try:
                 execution = _execute_sandbox_tool(
