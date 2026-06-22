@@ -151,6 +151,16 @@ export default function ReportPage() {
     }
   }, [])
 
+  // Enable scrolling for report page overriding global styling constraints
+  useEffect(() => {
+    document.documentElement.style.overflow = "auto"
+    document.body.style.overflow = "auto"
+    return () => {
+      document.documentElement.style.overflow = ""
+      document.body.style.overflow = ""
+    }
+  }, [])
+
   // Trigger Report Generation using Thinking Mode
   const generateReport = useCallback(async (customPrompt?: string) => {
     if (!dataset || isRunning) return

@@ -163,6 +163,16 @@ export default function LandingPage() {
     }
   }, [])
 
+  // Enable scrolling for landing page overriding global styling constraints
+  useEffect(() => {
+    document.documentElement.style.overflow = "auto"
+    document.body.style.overflow = "auto"
+    return () => {
+      document.documentElement.style.overflow = ""
+      document.body.style.overflow = ""
+    }
+  }, [])
+
   // Parallax Scrolling effect
   useEffect(() => {
     const handleScroll = () => {
@@ -429,7 +439,7 @@ export default function LandingPage() {
               </div>
 
               {/* Feature 2: Insight Engine */}
-              <div className="glass-card p-6 rounded-2xl flex flex-col justify-between group md:row-span-2 hover:ai-glow transition-all duration-500 min-h-[380px]">
+              <div className="glass-card p-6 rounded-2xl flex flex-col justify-between group hover:ai-glow transition-all duration-500 min-h-[380px]">
                 <div className="h-full flex flex-col">
                   <div className="flex justify-between items-start mb-10">
                     <div className="p-2 bg-[#2d3449] rounded-lg">
