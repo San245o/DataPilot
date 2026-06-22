@@ -390,8 +390,8 @@ export default function LandingPage() {
           </a>
           <div className="hidden md:flex items-center gap-10">
             <a href="#hero" className={`text-sm font-semibold transition-all duration-300 ${activeSection === "hero" ? "text-[#4edea3] border-b border-[#4edea3] pb-1" : "text-[#bbcabf] hover:text-[#4edea3]"}`}>Home</a>
-            <a href="#problem" className={`text-sm font-semibold transition-all duration-300 ${activeSection === "problem" ? "text-[#4edea3] border-b border-[#4edea3] pb-1" : "text-[#bbcabf] hover:text-[#4edea3]"}`}>Problem</a>
-            <a href="#features" className={`text-sm font-semibold transition-all duration-300 ${activeSection === "features" ? "text-[#4edea3] border-b border-[#4edea3] pb-1" : "text-[#bbcabf] hover:text-[#4edea3]"}`}>Features</a>
+            <a href="#problem" className={`text-sm font-semibold transition-all duration-300 ${activeSection === "problem" ? "text-[#4edea3] border-b border-[#4edea3] pb-1" : "text-[#bbcabf] hover:text-[#4edea3]"}`}>Case Study</a>
+            <a href="#features" className={`text-sm font-semibold transition-all duration-300 ${activeSection === "features" ? "text-[#4edea3] border-b border-[#4edea3] pb-1" : "text-[#bbcabf] hover:text-[#4edea3]"}`}>Documentation</a>
             <a href="#cta" className={`text-sm font-semibold transition-all duration-300 ${activeSection === "cta" ? "text-[#4edea3] border-b border-[#4edea3] pb-1" : "text-[#bbcabf] hover:text-[#4edea3]"}`}>Get Started</a>
           </div>
           <div className="flex items-center gap-4">

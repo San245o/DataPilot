@@ -278,6 +278,10 @@ Crucial: In your planning step, you MUST generate at least one high-quality Plot
           if (trimmed.startsWith("## ")) return `<h2 class="text-xl font-extrabold text-white border-b border-slate-700/40 pb-1 mt-6 mb-3">${trimmed.slice(3)}</h2>`
           if (trimmed.startsWith("# ")) return `<h1 class="text-2xl font-black text-white mt-8 mb-4">${trimmed.slice(2)}</h1>`
           if (trimmed.startsWith("- ") || trimmed.startsWith("* ")) return `<li class="ml-6 list-disc text-slate-300">${trimmed.slice(2).replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")}</li>`
+          const numMatch = trimmed.match(/^(\d+)\.\s+(.*)$/)
+          if (numMatch) return `<li class="ml-6 list-decimal text-slate-300" value="${numMatch[1]}">${numMatch[2].replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")}</li>`
+          if (trimmed.startsWith("> ")) return `<blockquote class="border-l-4 border-emerald-500/50 bg-emerald-950/20 px-4 py-2.5 rounded-r-lg my-4 italic text-slate-400">${trimmed.slice(2).replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")}</blockquote>`
+          if (trimmed === "---") return `<hr class="border-slate-800 my-6" />`
           return `<p class="text-slate-300">${trimmed.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")}</p>`
         })
         .join("\n")}
@@ -518,6 +522,27 @@ Crucial: In your planning step, you MUST generate at least one high-quality Plot
                         Our agent is executing descriptive calculations, finding correlations, and drawing custom charts in real-time.
                       </p>
                     </div>
+                  </div>
+                )}
+
+
+                {/* Error State display */}
+                {error && !reportMarkdown && (
+                  <div className="flex flex-col items-center justify-center py-20 text-center space-y-4">
+                    <div className="p-3.5 rounded-full bg-red-500/10 border border-red-500/20 text-red-400">
+                      <AlertTriangle className="size-6" />
+                    </div>
+                    <h3 className="font-bold text-slate-200">Analysis Failed</h3>
+                    <p className="text-xs text-red-400 max-w-md">
+                      {error}
+                    </p>
+                    <button
+                      onClick={() => generateReport()}
+                      className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-bold transition-all active:scale-95 cursor-pointer"
+                    >
+                      <RotateCcw className="size-4 text-emerald-400" />
+                      <span>Try Again</span>
+                    </button>
                   </div>
                 )}
 
