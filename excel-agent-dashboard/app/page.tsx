@@ -29,8 +29,10 @@ export default function LandingPage() {
     const canvas = canvasRef.current
     if (!canvas) return
 
-    const gl = (canvas.getContext("webgl") || canvas.getContext("experimental-webgl")) as any
+    const gl = (canvas.getContext("webgl") || canvas.getContext("experimental-webgl")) as WebGLRenderingContext | null
     if (!gl) return
+
+    gl.getExtension("OES_standard_derivatives")
 
     const vs = `
       attribute vec2 a_position;
@@ -42,6 +44,7 @@ export default function LandingPage() {
     `
 
     const fs = `
+      #extension GL_OES_standard_derivatives : enable
       precision highp float;
       uniform float u_time;
       uniform vec2 u_resolution;
@@ -118,7 +121,7 @@ export default function LandingPage() {
     const uRes = gl.getUniformLocation(prog, "u_resolution")
     const uMouse = gl.getUniformLocation(prog, "u_mouse")
 
-    let mouse = { x: canvas.width / 2, y: canvas.height / 2 }
+    const mouse = { x: canvas.width / 2, y: canvas.height / 2 }
 
     const handleMouseMove = (event: MouseEvent) => {
       const rect = canvas.getBoundingClientRect()
@@ -442,10 +445,10 @@ export default function LandingPage() {
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-12 items-center">
               <div className="lg:col-span-5 parallax-layer" data-speed="-0.03">
                 <h2 className="text-2xl md:text-4xl text-white font-bold leading-tight mb-4">
-                  Spreadsheets are the backbone of business, but they're <span className="text-[#ffb4ab]">broken</span>.
+                  Spreadsheets are the backbone of business, but they&apos;re <span className="text-[#ffb4ab]">broken</span>.
                 </h2>
                 <p className="text-xs md:text-sm text-[#bbcabf] mb-6 leading-relaxed">
-                  Legacy tools weren't built for the scale and complexity of today's data. Manual cleaning takes hours. Complex formulas are prone to error. Insights remain hidden behind technical barriers.
+                  Legacy tools weren&apos;t built for the scale and complexity of today&apos;s data. Manual cleaning takes hours. Complex formulas are prone to error. Insights remain hidden behind technical barriers.
                 </p>
                 <div className="space-y-3">
                   <div className="flex items-start gap-4 p-3.5 glass-card rounded-xl">
@@ -489,7 +492,7 @@ export default function LandingPage() {
                   <div>
                     <h3 className="text-base font-bold text-white mb-1.5">Autonomous Agency</h3>
                     <p className="text-[11px] text-[#bbcabf] leading-relaxed">
-                      DataPilot doesn't just suggest—it acts. Assign complex multi-step workflows and watch them complete in real-time with full transparency.
+                      DataPilot doesn&apos;t just suggest—it acts. Assign complex multi-step workflows and watch them complete in real-time with full transparency.
                     </p>
                   </div>
                 </div>
@@ -532,7 +535,7 @@ export default function LandingPage() {
                 </div>
                 <div className="mt-4 p-2.5 bg-[#0b1326]/50 rounded-lg border border-[#3c4a42]/30 font-mono text-[9px] overflow-hidden space-y-1">
                   <div className="flex gap-2 text-[#4edea3]">
-                    <span>[AI]</span> <span>Analyzing column 'Date'...</span>
+                    <span>[AI]</span> <span>Analyzing column &apos;Date&apos;...</span>
                   </div>
                   <div className="flex gap-2 text-[#bbcabf]">
                     <span>[DP]</span> <span className="animate-pulse">Standardizing to ISO 8601...</span>
@@ -551,12 +554,12 @@ export default function LandingPage() {
                       <span className="text-[9px] font-mono text-[#adc6ff]/60 font-semibold tracking-wider">DP-CORE-X</span>
                     </div>
                     <h3 className="text-base font-bold text-white mb-2">Insight Engine</h3>
-                    <p className="text-[11px] text-[#bbcabf] leading-relaxed">Ask questions in plain English: "Show me the correlation between regional sales and marketing spend for Q3."</p>
+                    <p className="text-[11px] text-[#bbcabf] leading-relaxed">Ask questions in plain English: &quot;Show me the correlation between regional sales and marketing spend for Q3.&quot;</p>
                   </div>
                   
                   <div className="mt-4 relative space-y-3">
                     <div className="p-3 bg-[#222a3d] rounded-xl border border-[#3c4a42]/50">
-                      <div className="text-[9px] text-[#bbcabf] italic mb-2">"Compare growth vs LY"</div>
+                      <div className="text-[9px] text-[#bbcabf] italic mb-2">&quot;Compare growth vs LY&quot;</div>
                       <div className="h-16 w-full bg-gradient-to-tr from-[#4edea3]/10 to-[#adc6ff]/10 rounded-lg flex items-end justify-between p-1.5 gap-1">
                         <div className="bg-[#4edea3]/40 w-1/6 h-[40%] rounded-sm"></div>
                         <div className="bg-[#4edea3]/40 w-1/6 h-[60%] rounded-sm"></div>
@@ -588,7 +591,7 @@ export default function LandingPage() {
                   <p className="text-[11px] text-[#bbcabf] leading-relaxed">Never write a complex nested IF or VLOOKUP again. Describe the logic, and DataPilot generates the optimized syntax.</p>
                 </div>
                 <div className="mt-4 font-mono text-[9px] text-[#95d3ba] p-2.5 bg-[#95d3ba]/5 rounded-lg border border-[#95d3ba]/25 overflow-x-auto">
-                  =IF(AND(A2&gt;100, B2="Tier 1"), C2*1.15, C2*0.95)
+                  =IF(AND(A2&gt;100, B2=&quot;Tier 1&quot;), C2*1.15, C2*0.95)
                 </div>
               </div>
 

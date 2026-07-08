@@ -120,7 +120,7 @@ LINE: fig=px.line(trend,x='Year',y='Value',template='plotly_dark',markers=True)
 PIE: fig=px.pie(values=counts.values,names=counts.index,template='plotly_dark')
 fig.update_traces(textinfo='percent',hoverinfo='label+value+percent')
 
-SCATTER: fig=px.scatter(df,x='X',y='Y',template='plotly_dark',hover_data=['Name'])
+SCATTER: fig=px.scatter(df,x='X',y='Y',template='plotly_dark',hover_data=['Name']) # Note: px.scatter does NOT accept a 'markers' argument (it uses markers by default)
 
 SUBPLOTS:
 fig = make_subplots(rows=1, cols=2, subplot_titles=['Left', 'Right'])
@@ -800,6 +800,7 @@ COMMON FIXES:
 - To log a computed DataFrame/Series, use: log_output(my_var)
 - Ensure variables are defined before use
 - Use single quotes for strings
+- px.scatter() does not accept a 'markers' argument (only px.line() does)
 
 {_build_output_contract(thinking_mode)}
 

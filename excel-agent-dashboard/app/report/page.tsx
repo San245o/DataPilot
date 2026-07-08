@@ -1,27 +1,22 @@
 "use client"
 
-import { useEffect, useState, useMemo, useCallback, useRef } from "react"
-import { useRouter } from "next/navigation"
+import { useEffect, useState, useCallback, useRef } from "react"
 import Link from "next/link"
 import {
   ArrowLeft,
   Download,
   Loader2,
-  FileText,
-  CheckCircle2,
   Play,
   Printer,
   RotateCcw,
   Sparkles,
-  Search,
   Database,
-  Grid,
   AlertTriangle
 } from "lucide-react"
 
 import { useAgentRunner } from "@/components/dashboard/hooks/use-agent-runner"
 import { PlotlyBoard } from "@/components/charts/plotly-board"
-import { DEFAULT_THINKING_MODEL, type SheetRow, type ThinkingTraceEntry } from "@/components/dashboard/dashboard-shared"
+import { DEFAULT_THINKING_MODEL, type SheetRow, type ThinkingTraceEntry, type QueryTablePayload, type VisualizationPayload } from "@/components/dashboard/dashboard-shared"
 
 interface SavedDataset {
   id: string
@@ -126,7 +121,6 @@ function parseInlineMarkdown(text: string) {
 }
 
 export default function ReportPage() {
-  const router = useRouter()
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
   // WebGL Shader Background Logic
@@ -134,8 +128,10 @@ export default function ReportPage() {
     const canvas = canvasRef.current
     if (!canvas) return
 
-    const gl = (canvas.getContext("webgl") || canvas.getContext("experimental-webgl")) as any
+    const gl = (canvas.getContext("webgl") || canvas.getContext("experimental-webgl")) as WebGLRenderingContext | null
     if (!gl) return
+
+    gl.getExtension("OES_standard_derivatives")
 
     const vs = `
       attribute vec2 a_position;
@@ -147,6 +143,7 @@ export default function ReportPage() {
     `
 
     const fs = `
+      #extension GL_OES_standard_derivatives : enable
       precision highp float;
       uniform float u_time;
       uniform vec2 u_resolution;
@@ -223,7 +220,7 @@ export default function ReportPage() {
     const uRes = gl.getUniformLocation(prog, "u_resolution")
     const uMouse = gl.getUniformLocation(prog, "u_mouse")
 
-    let mouse = { x: canvas.width / 2, y: canvas.height / 2 }
+    const mouse = { x: canvas.width / 2, y: canvas.height / 2 }
 
     const handleMouseMove = (event: MouseEvent) => {
       const rect = canvas.getBoundingClientRect()
@@ -268,29 +265,26 @@ export default function ReportPage() {
     }
   }, [])
 
-  const [dataset, setDataset] = useState<SavedDataset | null>(null)
-  const [reportHtml, setReportHtml] = useState<string>("")
-  const [reportMarkdown, setReportMarkdown] = useState<string>("")
-  const [visualization, setVisualization] = useState<any | null>(null)
-  const [loggedTables, setLoggedTables] = useState<any[]>([])
-  const [thinkingTrace, setThinkingTrace] = useState<ThinkingTraceEntry[]>([])
-  const [reportTitle, setReportTitle] = useState("Dataset Analysis Report")
-
-  const { runAgent, isRunning, error, cancelRun } = useAgentRunner()
-
-  // Retrieve dataset from sessionStorage on mount
-  useEffect(() => {
+  const [dataset] = useState<SavedDataset | null>(() => {
     if (typeof window !== "undefined") {
       const stored = sessionStorage.getItem("report_dataset")
       if (stored) {
         try {
-          setDataset(JSON.parse(stored))
+          return JSON.parse(stored) as SavedDataset
         } catch (e) {
           console.error("Failed to parse stored dataset", e)
         }
       }
     }
-  }, [])
+    return null
+  })
+  const [reportMarkdown, setReportMarkdown] = useState<string>("")
+  const [visualization, setVisualization] = useState<VisualizationPayload | null>(null)
+  const [loggedTables, setLoggedTables] = useState<QueryTablePayload[]>([])
+  const [thinkingTrace, setThinkingTrace] = useState<ThinkingTraceEntry[]>([])
+  const [reportTitle, setReportTitle] = useState("Dataset Analysis Report")
+
+  const { runAgent, isRunning, error, cancelRun } = useAgentRunner()
 
   // Enable scrolling for report page overriding global styling constraints
   useEffect(() => {
@@ -359,9 +353,12 @@ Crucial: In your planning step, you MUST generate at least one high-quality Plot
   // Generate automatically once dataset is loaded
   useEffect(() => {
     if (dataset) {
-      generateReport()
+      const timer = setTimeout(() => {
+        generateReport()
+      }, 0)
+      return () => clearTimeout(timer)
     }
-  }, [dataset])
+  }, [dataset, generateReport])
 
   // Download Report as Markdown
   const downloadMarkdown = () => {
@@ -722,7 +719,7 @@ Crucial: In your planning step, you MUST generate at least one high-quality Plot
                         </h3>
                         <div className="h-[380px] w-full rounded-2xl border border-slate-800 bg-slate-950/30 p-4 shadow-inner">
                           <PlotlyBoard 
-                            data={visualization.data} 
+                            data={visualization.data || []} 
                             layout={visualization.layout} 
                             frames={visualization.frames} 
                             isDark={true} 
@@ -747,12 +744,12 @@ Crucial: In your planning step, you MUST generate at least one high-quality Plot
                               </tr>
                             </thead>
                             <tbody>
-                              {table.rows.map((row: any, rIdx: number) => (
+                              {table.rows.map((row: Record<string, unknown>, rIdx: number) => (
                                 <tr 
                                   key={rIdx} 
                                   className="border-b border-slate-850 hover:bg-slate-900/40 text-slate-400 transition-colors"
                                 >
-                                  {Object.values(row).map((val: any, cIdx: number) => (
+                                  {Object.values(row).map((val: unknown, cIdx: number) => (
                                     <td key={cIdx} className="px-4 py-2 border-r border-slate-850 truncate max-w-xs">
                                       {val !== null && val !== undefined ? String(val) : ""}
                                     </td>
