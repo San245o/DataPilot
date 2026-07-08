@@ -456,7 +456,7 @@ def _parse_model_response(raw: str) -> dict[str, Any]:
 
 def _invoke_model(*, model_name: str, system_prompt: str, user_message: str) -> tuple[str, dict[str, int]]:
     usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-    normalized_model = str(model_name or "").strip()
+    normalized_model = (model_name or "").strip()
     if not normalized_model:
         raise RuntimeError("Model name is required. Silent fallback to Gemini 3.1 Flash Lite is disabled.")
 
@@ -479,7 +479,7 @@ def _invoke_model(*, model_name: str, system_prompt: str, user_message: str) -> 
             credential=AzureKeyCredential(github_token),
             retry_total=0,
         )
-        response = client.complete(
+        response = client.complete(  # type: ignore
             messages=[SystemMessage(system_prompt), UserMessage(user_message)],
             temperature=0,
             model=normalized_model,
@@ -512,12 +512,12 @@ def _invoke_model(*, model_name: str, system_prompt: str, user_message: str) -> 
         }
         try:
             # Prefer strict JSON mode when supported by the model.
-            response = client.chat.completions.create(
+            response = client.chat.completions.create(  # type: ignore
                 **request_payload,
                 response_format={"type": "json_object"},
             )
         except Exception:
-            response = client.chat.completions.create(**request_payload)
+            response = client.chat.completions.create(**request_payload)  # type: ignore
 
         try:
             raw = response.choices[0].message.content or ""
@@ -548,10 +548,10 @@ def _invoke_model(*, model_name: str, system_prompt: str, user_message: str) -> 
         generation_config["response_mime_type"] = "application/json"
 
     try:
-        response = model.generate_content([system_prompt, user_message], generation_config=generation_config)
+        response = model.generate_content([system_prompt, user_message], generation_config=generation_config)  # type: ignore
     except Exception:
         # Fall back to basic generation if a model does not support response MIME controls.
-        response = model.generate_content([system_prompt, user_message], generation_config={"temperature": 0})
+        response = model.generate_content([system_prompt, user_message], generation_config={"temperature": 0})  # type: ignore
 
     raw = response.text or ""
     if hasattr(response, "usage_metadata") and response.usage_metadata:
@@ -570,7 +570,7 @@ def invoke_model_json(*, model_name: str, system_prompt: str, user_message: str)
 
 
 def clean_final_reply_text(reply: str, *, initial_reply: str, wants_list: bool = False) -> str:
-    text = str(reply or "").replace("\r\n", "\n").strip()
+    text = (reply or "").replace("\r\n", "\n").strip()
     if not text:
         return initial_reply
 
@@ -901,7 +901,7 @@ Never output markdown or ASCII tables in this response."""
             credential=AzureKeyCredential(github_token),
             retry_total=0,
         )
-        response = client.complete(
+        response = client.complete(  # type: ignore
             messages=[
                 SystemMessage("Summarize data results clearly and concisely. Do not output markdown or ASCII tables."),
                 UserMessage(user_message)
@@ -922,7 +922,7 @@ Never output markdown or ASCII tables in this response."""
     else:
         if not api_key:
             return {"reply": initial_reply, "token_usage": usage}
-        normalized_model = str(model_name or "").strip()
+        normalized_model = (model_name or "").strip()
         if not normalized_model:
             return {"reply": clean_final_reply_text(initial_reply, initial_reply=initial_reply, wants_list=wants_list), "token_usage": usage}
         genai.configure(api_key=api_key)
