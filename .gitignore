@@ -102,3 +102,4 @@ nul
 # Keep sample/seed data if needed
 !**/sample/**
 !**/seeds/**
+excel-agent-dashboard/node_modules_old/ 
