@@ -68,7 +68,7 @@ function ChartViewerState({ chartKey, isHydrated }: ChartViewerStateProps) {
       paper_bgcolor: "rgba(0,0,0,0)",
       plot_bgcolor: "rgba(0,0,0,0)",
     } as Partial<Layout>
-  }, [payload?.layout])
+  }, [payload])
 
   if (error) {
     return (

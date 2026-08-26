@@ -22,7 +22,7 @@ echo "Frontend directory: $FRONTEND_DIR"
 echo "Frontend URL:       http://127.0.0.1:$PORT"
 
 if command -v pnpm >/dev/null 2>&1; then
-  exec pnpm dev -- -p "$PORT"
+  exec pnpm dev --port "$PORT"
 else
-  exec npm run dev -- -p "$PORT"
+  exec npm run dev -- --port "$PORT"
 fi

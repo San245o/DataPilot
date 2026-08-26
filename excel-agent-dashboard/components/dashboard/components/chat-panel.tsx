@@ -349,7 +349,10 @@ export function ChatPanel({
   const activeDescription = showSlashMenu ? visibleSlashDescriptionFor : null
 
   useEffect(() => {
-    setPromptCursor((prev) => Math.min(prev, prompt.length))
+    const timer = setTimeout(() => {
+      setPromptCursor((prev) => Math.min(prev, prompt.length))
+    }, 0)
+    return () => clearTimeout(timer)
   }, [prompt.length])
 
   useEffect(() => {
