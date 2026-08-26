@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react"
 import Papa from "papaparse"
 import * as XLSX from "xlsx"
+import { useRouter } from "next/navigation"
 import {
   Archive,
   ChevronDown,
@@ -11,6 +12,7 @@ import {
   Database,
   Download,
   FileSpreadsheet,
+  FileText,
   Moon,
   Sun,
   Trash2,
@@ -458,6 +460,7 @@ async function buildZip(files: Array<{ name: string; blob: Blob }>) {
 }
 
 export function AgentDashboard() {
+  const router = useRouter()
   const [datasets, setDatasets] = useState<WorkspaceDataset[]>([initialDataset])
   const [activeDatasetId, setActiveDatasetId] = useState(initialDataset.id)
   const [attachedDatasetIds, setAttachedDatasetIds] = useState<string[]>([])
@@ -758,6 +761,12 @@ export function AgentDashboard() {
     const zip = await buildZip(files)
     downloadBlob(zip, "datapilot-workspace.zip")
   }, [datasets])
+
+  const handleAutoReport = useCallback(() => {
+    if (!activeDataset) return
+    sessionStorage.setItem("report_dataset", JSON.stringify(activeDataset))
+    router.push("/report")
+  }, [activeDataset, router])
 
   const handleDeleteDataset = useCallback((datasetId: string) => {
     const nextDatasets = datasets.filter((dataset) => dataset.id !== datasetId)
@@ -1199,6 +1208,19 @@ export function AgentDashboard() {
             >
               <Archive className="size-4 shrink-0" />
               {!sidebarCollapsed && <span className="text-xs font-medium truncate">Download ZIP</span>}
+            </button>
+
+            <button
+              type="button"
+              onClick={handleAutoReport}
+              disabled={datasets.length === 0}
+              className={`w-full group flex items-center gap-2.5 rounded-lg border border-dashed border-border p-2.5 text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground hover:bg-accent/50 disabled:opacity-50 disabled:cursor-not-allowed ${
+                sidebarCollapsed ? "justify-center" : ""
+              }`}
+              title="Generate Auto Report"
+            >
+              <FileText className="size-4 shrink-0" />
+              {!sidebarCollapsed && <span className="text-xs font-medium truncate">Auto Report</span>}
             </button>
           </div>
 

@@ -1,0 +1,2 @@
+[tool.pyrefly]
+python-interpreter-path = "excel-agent-backend/.venv/Scripts/python.exe"
