@@ -8,12 +8,13 @@ import threading
 from typing import Any
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 
 from agent import supports_thinking_model
+from auth import get_current_user
 from schemas import AgentRequest, AgentResponse, DatasetRegisterRequest, DatasetRegisterResponse
 from thinking import run_thinking_agent
 from workflow import build_workflow
@@ -45,7 +46,7 @@ def get_workflow():
     return _workflow
 
 
-def _cache_dataset(rows: list[dict[str, Any]], name: str | None = None) -> str:
+def _cache_dataset(rows: list[dict[str, Any]], name: str | None = None, user_id: str = "anonymous") -> str:
     dataset_id = uuid4().hex
     _dataset_store[dataset_id] = {
         "rows": rows,
@@ -53,6 +54,7 @@ def _cache_dataset(rows: list[dict[str, Any]], name: str | None = None) -> str:
         "kind": "uploaded",
         "source_dataset_ids": [],
         "modified": False,
+        "user_id": user_id,
     }
     _dataset_store.move_to_end(dataset_id)
 
@@ -70,6 +72,7 @@ def _upsert_cached_dataset(
     kind: str = "uploaded",
     source_dataset_ids: list[str] | None = None,
     modified: bool = False,
+    user_id: str = "anonymous",
 ) -> None:
     _dataset_store[dataset_id] = {
         "rows": rows,
@@ -77,6 +80,7 @@ def _upsert_cached_dataset(
         "kind": kind,
         "source_dataset_ids": source_dataset_ids or [],
         "modified": modified,
+        "user_id": user_id,
     }
     _dataset_store.move_to_end(dataset_id)
 
@@ -84,24 +88,30 @@ def _upsert_cached_dataset(
         _dataset_store.popitem(last=False)
 
 
-def _get_cached_dataset(dataset_id: str) -> dict[str, Any]:
+def _get_cached_dataset(dataset_id: str, requesting_user_id: str = "anonymous") -> dict[str, Any]:
     cached = _dataset_store.get(dataset_id)
     if cached is None:
         raise HTTPException(status_code=404, detail=f"Dataset not found: {dataset_id}. Upload again.")
+
+    owner_id = cached.get("user_id", "anonymous")
+    # Strict ownership check: if dataset has an owner, requesting user must match
+    if owner_id != "anonymous" and owner_id != requesting_user_id:
+        logger.warning(f"Unauthorized dataset access attempt: dataset={dataset_id}, owner={owner_id}, requested_by={requesting_user_id}")
+        raise HTTPException(status_code=403, detail="Forbidden: You do not have permission to access this dataset.")
+
     _dataset_store.move_to_end(dataset_id)
     return cached
 
 
-def _resolve_rows(payload: AgentRequest) -> list[dict[str, Any]]:
+def _resolve_rows(payload: AgentRequest, user_id: str = "anonymous") -> list[dict[str, Any]]:
     dataset_id = payload.active_dataset_id or payload.dataset_id
     if dataset_id:
-        cached = _get_cached_dataset(dataset_id)
+        cached = _get_cached_dataset(dataset_id, requesting_user_id=user_id)
         return list(cached.get("rows") or [])
-
     return payload.rows
 
 
-def _resolve_selected_datasets(payload: AgentRequest) -> dict[str, dict[str, Any]]:
+def _resolve_selected_datasets(payload: AgentRequest, user_id: str = "anonymous") -> dict[str, dict[str, Any]]:
     selected_ids: list[str] = []
     for dataset_id in [payload.active_dataset_id or payload.dataset_id, *payload.selected_dataset_ids]:
         if dataset_id and dataset_id not in selected_ids:
@@ -109,7 +119,7 @@ def _resolve_selected_datasets(payload: AgentRequest) -> dict[str, dict[str, Any
 
     resolved: dict[str, dict[str, Any]] = {}
     for dataset_id in selected_ids:
-        cached = _get_cached_dataset(dataset_id)
+        cached = _get_cached_dataset(dataset_id, requesting_user_id=user_id)
         resolved[dataset_id] = {
             **cached,
             "name": payload.dataset_names.get(dataset_id) or cached.get("name") or dataset_id,
@@ -159,7 +169,11 @@ def _build_agent_response(payload: dict[str, Any], default_rows: list[dict[str, 
     )
 
 
-def _persist_response_datasets(response_payload: dict[str, Any], dataset_names: dict[str, str] | None = None) -> None:
+def _persist_response_datasets(
+    response_payload: dict[str, Any],
+    dataset_names: dict[str, str] | None = None,
+    user_id: str = "anonymous",
+) -> None:
     dataset_names = dataset_names or {}
     for dataset in response_payload.get("updated_datasets") or []:
         dataset_id = dataset.get("dataset_id")
@@ -171,6 +185,7 @@ def _persist_response_datasets(response_payload: dict[str, Any], dataset_names: 
                 kind=dataset.get("kind") or "uploaded",
                 source_dataset_ids=dataset.get("source_dataset_ids") or [],
                 modified=bool(dataset.get("modified", True)),
+                user_id=user_id,
             )
 
     for dataset in response_payload.get("created_datasets") or []:
@@ -183,13 +198,17 @@ def _persist_response_datasets(response_payload: dict[str, Any], dataset_names: 
             kind="derived",
             source_dataset_ids=dataset.get("source_dataset_ids") or [],
             modified=True,
+            user_id=user_id,
         )
 
 
 def _require_model_name(model_name: str) -> str:
     normalized = str(model_name or "").strip()
     if not normalized:
-        raise HTTPException(status_code=400, detail="Model is required. The backend will not silently fall back to Gemini 3.1 Flash Lite.")
+        raise HTTPException(
+            status_code=400,
+            detail="Model is required. The backend will not silently fall back to Gemini 3.1 Flash Lite.",
+        )
     return normalized
 
 
@@ -199,11 +218,15 @@ def health() -> dict[str, str]:
 
 
 @app.post("/dataset/register", response_model=DatasetRegisterResponse)
-def register_dataset(payload: DatasetRegisterRequest) -> DatasetRegisterResponse:
+def register_dataset(
+    payload: DatasetRegisterRequest,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> DatasetRegisterResponse:
     if not payload.rows:
         raise HTTPException(status_code=400, detail="Upload data first")
 
-    dataset_id = _cache_dataset(payload.rows, payload.name)
+    user_id = current_user.get("user_id", "anonymous")
+    dataset_id = _cache_dataset(payload.rows, payload.name, user_id=user_id)
     column_count = len(payload.rows[0]) if payload.rows else 0
     return DatasetRegisterResponse(
         dataset_id=dataset_id,
@@ -213,18 +236,23 @@ def register_dataset(payload: DatasetRegisterRequest) -> DatasetRegisterResponse
 
 
 @app.post("/agent/execute", response_model=AgentResponse)
-def execute_agent(payload: AgentRequest) -> AgentResponse:
-    rows = _resolve_rows(payload)
+def execute_agent(
+    payload: AgentRequest,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> AgentResponse:
+    user_id = current_user.get("user_id", "anonymous")
+    rows = _resolve_rows(payload, user_id=user_id)
     if not rows:
         raise HTTPException(status_code=400, detail="Upload data first")
+
     if payload.thinking_mode:
         raise HTTPException(status_code=400, detail="Use /agent/think for thinking mode requests.")
     model_name = _require_model_name(payload.model)
-    logger.info("agent.execute model=%s thinking=%s rows=%s", model_name, payload.thinking_mode, len(rows))
+    logger.info("agent.execute user=%s model=%s thinking=%s rows=%s", user_id, model_name, payload.thinking_mode, len(rows))
 
     try:
         workflow = get_workflow()
-        selected_datasets = _resolve_selected_datasets(payload)
+        selected_datasets = _resolve_selected_datasets(payload, user_id=user_id)
         final_state = workflow.invoke({
             "prompt": payload.prompt,
             "rows": rows,
@@ -249,7 +277,7 @@ def execute_agent(payload: AgentRequest) -> AgentResponse:
             "thinking_trace": [],
         }
 
-        _persist_response_datasets(response_payload, payload.dataset_names)
+        _persist_response_datasets(response_payload, payload.dataset_names, user_id=user_id)
 
         return _build_agent_response(response_payload, rows)
     except HTTPException:
@@ -259,8 +287,12 @@ def execute_agent(payload: AgentRequest) -> AgentResponse:
 
 
 @app.post("/agent/think", response_model=AgentResponse)
-def execute_thinking_agent(payload: AgentRequest) -> AgentResponse:
-    rows = _resolve_rows(payload)
+def execute_thinking_agent(
+    payload: AgentRequest,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> AgentResponse:
+    user_id = current_user.get("user_id", "anonymous")
+    rows = _resolve_rows(payload, user_id=user_id)
     if not rows:
         raise HTTPException(status_code=400, detail="Upload data first")
     model_name = _require_model_name(payload.model)
@@ -269,7 +301,7 @@ def execute_thinking_agent(payload: AgentRequest) -> AgentResponse:
             status_code=400,
             detail="Thinking mode only supports Gemma 4 31B IT and Minimax m2.5.",
         )
-    logger.info("agent.think model=%s thinking=%s rows=%s", model_name, payload.thinking_mode, len(rows))
+    logger.info("agent.think user=%s model=%s thinking=%s rows=%s", user_id, model_name, payload.thinking_mode, len(rows))
 
     try:
         result = run_thinking_agent(
@@ -277,13 +309,13 @@ def execute_thinking_agent(payload: AgentRequest) -> AgentResponse:
             rows=rows,
             model_name=model_name,
             history=[m.model_dump() for m in payload.history],
-            datasets=_resolve_selected_datasets(payload),
+            datasets=_resolve_selected_datasets(payload, user_id=user_id),
             active_dataset_id=payload.active_dataset_id or payload.dataset_id,
             selected_dataset_ids=payload.selected_dataset_ids,
             dataset_names=payload.dataset_names,
             selection_context=payload.selection_context,
         )
-        _persist_response_datasets(result, payload.dataset_names)
+        _persist_response_datasets(result, payload.dataset_names, user_id=user_id)
         return _build_agent_response(result, rows)
     except HTTPException:
         raise
@@ -292,8 +324,12 @@ def execute_thinking_agent(payload: AgentRequest) -> AgentResponse:
 
 
 @app.post("/agent/think/stream")
-def execute_thinking_agent_stream(payload: AgentRequest) -> StreamingResponse:
-    rows = _resolve_rows(payload)
+def execute_thinking_agent_stream(
+    payload: AgentRequest,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> StreamingResponse:
+    user_id = current_user.get("user_id", "anonymous")
+    rows = _resolve_rows(payload, user_id=user_id)
     if not rows:
         raise HTTPException(status_code=400, detail="Upload data first")
     model_name = _require_model_name(payload.model)
@@ -302,7 +338,7 @@ def execute_thinking_agent_stream(payload: AgentRequest) -> StreamingResponse:
             status_code=400,
             detail="Thinking mode only supports Gemma 4 31B IT and Minimax m2.5.",
         )
-    logger.info("agent.think.stream model=%s thinking=%s rows=%s", model_name, payload.thinking_mode, len(rows))
+    logger.info("agent.think.stream user=%s model=%s thinking=%s rows=%s", user_id, model_name, payload.thinking_mode, len(rows))
 
     event_queue: Queue[dict[str, Any] | None] = Queue()
 
@@ -316,14 +352,14 @@ def execute_thinking_agent_stream(payload: AgentRequest) -> StreamingResponse:
                 rows=rows,
                 model_name=model_name,
                 history=[m.model_dump() for m in payload.history],
-                datasets=_resolve_selected_datasets(payload),
+                datasets=_resolve_selected_datasets(payload, user_id=user_id),
                 active_dataset_id=payload.active_dataset_id or payload.dataset_id,
                 selected_dataset_ids=payload.selected_dataset_ids,
                 dataset_names=payload.dataset_names,
                 selection_context=payload.selection_context,
                 event_callback=lambda entry: emit({"type": "trace", "entry": entry}),
             )
-            _persist_response_datasets(result, payload.dataset_names)
+            _persist_response_datasets(result, payload.dataset_names, user_id=user_id)
             response = _build_agent_response(result, rows)
             emit({"type": "final", "payload": response.model_dump(mode="json")})
         except Exception as exc:
