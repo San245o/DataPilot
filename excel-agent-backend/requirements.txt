@@ -12,3 +12,5 @@ azure-ai-inference
 azure-core
 langchain-nvidia-ai-endpoints
 openai
+PyJWT==2.10.1
+cryptography

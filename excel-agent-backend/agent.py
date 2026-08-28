@@ -8,6 +8,9 @@ import re
 from typing import Any
 
 import google.generativeai as genai
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logger = logging.getLogger("excel-agent-backend.model")
 

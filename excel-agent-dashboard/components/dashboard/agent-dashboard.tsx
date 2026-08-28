@@ -13,11 +13,14 @@ import {
   Download,
   FileSpreadsheet,
   FileText,
+  LogOut,
   Moon,
   Sun,
   Trash2,
   Upload,
+  User,
 } from "lucide-react"
+import { getClientSession, logoutUser } from "@/lib/auth/client"
 
 import {
   clamp,
@@ -482,6 +485,32 @@ export function AgentDashboard() {
   const [queryCount, setQueryCount] = useState(0)
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(INITIAL_CHAT_MESSAGES)
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
+  const [userEmail, setUserEmail] = useState<string | null>(null)
+  const [isBypassMode, setIsBypassMode] = useState<boolean>(false)
+
+  useEffect(() => {
+    getClientSession().then((session) => {
+      if (session?.email) {
+        setUserEmail(session.email)
+      }
+    })
+    fetch("/api/auth/session")
+      .then((res) => res.json())
+      .then((data) => {
+        if (data?.isBypassMode) {
+          setIsBypassMode(true)
+        }
+      })
+      .catch(() => {})
+  }, [])
+
+  const handleLogout = useCallback(async () => {
+    if (isBypassMode) {
+      router.push("/")
+      return
+    }
+    await logoutUser()
+  }, [isBypassMode, router])
   const [thinkingMode, setThinkingMode] = useState(false)
   const [undoStack, setUndoStack] = useState<DataMutationHistoryEntry[]>([])
   const [redoStack, setRedoStack] = useState<DataMutationHistoryEntry[]>([])
@@ -1364,10 +1393,34 @@ export function AgentDashboard() {
               {isDark ? <Sun className="size-3.5 shrink-0" /> : <Moon className="size-3.5 shrink-0" />}
               {!sidebarCollapsed && <span className="font-medium">{isDark ? "Light mode" : "Dark mode"}</span>}
             </button>
+
+            <button
+              type="button"
+              onClick={handleLogout}
+              className={`w-full flex items-center gap-2.5 rounded-md px-2.5 py-2 text-xs text-destructive/80 transition-colors hover:bg-destructive/10 hover:text-destructive ${
+                sidebarCollapsed ? "justify-center" : ""
+              }`}
+              title="Sign Out"
+            >
+              <LogOut className="size-3.5 shrink-0" />
+              {!sidebarCollapsed && <span className="font-medium">Sign Out</span>}
+            </button>
           </div>
 
           {!sidebarCollapsed && (
-            <div className="mt-auto border-t border-border p-3">
+            <div className="mt-auto border-t border-border p-3 space-y-3">
+              {isBypassMode && (
+                <div className="flex items-center gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-[10px] font-semibold text-amber-400">
+                  <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
+                  <span>Development Auth Bypass</span>
+                </div>
+              )}
+              {userEmail && (
+                <div className="flex items-center gap-2 rounded-lg bg-secondary/50 p-2 text-xs text-muted-foreground">
+                  <User className="size-3.5 shrink-0 text-primary" />
+                  <span className="truncate text-[11px] font-medium text-foreground">{userEmail}</span>
+                </div>
+              )}
               <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider mb-1.5">
                 Model
               </div>

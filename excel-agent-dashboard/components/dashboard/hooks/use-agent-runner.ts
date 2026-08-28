@@ -1,7 +1,6 @@
 "use client"
 
 import { useCallback, useRef, useState } from "react"
-
 import {
   expandSlashPrompt,
   normalizeRows,
@@ -139,9 +138,11 @@ async function fetchThinkingFinalFallback({
   selectionContext?: DataSelectionContext | null
   signal?: AbortSignal
 }): Promise<AgentExecuteResponse> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" }
+
   const response = await fetch(`${API_BASE_URL}/agent/think`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     signal,
     body: JSON.stringify({
       prompt: expandedPrompt,
@@ -219,9 +220,11 @@ export function useAgentRunner() {
     let lastAttemptedUrl = endpoint
 
     try {
+      const headers: Record<string, string> = { "Content-Type": "application/json" }
+
       const response = await fetch(endpoint, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         signal: abortController.signal,
         body: JSON.stringify({
           prompt: expandedPrompt,
