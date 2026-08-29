@@ -560,6 +560,16 @@ export function ChatPanel({
                   ) : null
                 )}
 
+                {message.role === "assistant" && message.sources && message.sources.length > 0 && (
+                  <div className="mt-2 flex max-w-[90%] flex-wrap gap-1.5 px-1">
+                    {message.sources.map((source) => (
+                      <a key={source.url} href={source.url} target="_blank" rel="noreferrer" className="rounded-md border border-border bg-card px-2 py-1 text-[10px] font-medium text-primary hover:bg-accent">
+                        {source.title}
+                      </a>
+                    ))}
+                  </div>
+                )}
+
                 {message.role === "assistant" &&
                   Array.isArray(message.table_links) &&
                   message.table_links.length > 0 && (

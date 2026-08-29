@@ -82,3 +82,53 @@ class AgentResponse(BaseModel):
     highlighted_columns: list[HighlightedColumn] = Field(default_factory=list)
     thinking_trace: list[ThinkingTraceEntry] = Field(default_factory=list)
     token_usage: TokenUsage | None = None
+    sources: list[dict[str, str]] = Field(default_factory=list)
+
+
+class ReportRequest(BaseModel):
+    dataset_id: str
+    model: str
+
+
+class ReportMetric(BaseModel):
+    label: str
+    value: str
+
+
+class ReportSection(BaseModel):
+    title: str
+    content: str
+    items: list[dict[str, str]] = Field(default_factory=list)
+
+
+class ReportTable(BaseModel):
+    title: str
+    columns: list[str]
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+    interpretation: str = ""
+
+
+class ReportChart(BaseModel):
+    title: str
+    figure: dict[str, Any]
+    interpretation: str
+
+
+class ReportDataset(BaseModel):
+    id: str
+    name: str
+    rows: int
+    columns: int
+
+
+class AutoReportResponse(BaseModel):
+    dataset: ReportDataset
+    summary: str
+    metrics: list[ReportMetric] = Field(default_factory=list)
+    sections: list[ReportSection] = Field(default_factory=list)
+    tables: list[ReportTable] = Field(default_factory=list)
+    charts: list[ReportChart] = Field(default_factory=list)
+    conclusion: str
+    recommendations: list[str] = Field(default_factory=list)
+    sources: list[dict[str, str]] = Field(default_factory=list)
+    thinking_trace: list[ThinkingTraceEntry] = Field(default_factory=list)
