@@ -10,6 +10,7 @@ import pandas as pd
 
 from agent import clean_final_reply_text, invoke_model_json
 from sandbox import SandboxResult, run_sandboxed
+from web_search import WebSearchError, search_web
 
 MAX_PLAN_STEPS = 4
 MAX_OBSERVATION_CHARS = 900
@@ -95,7 +96,9 @@ The helper behavior is strict, so follow these exact contracts:
  - Use to_numeric_clean(...) when numeric fields may contain symbols or mixed text.
  - For simple non-ASCII checks, prefer string methods like value.isascii() when possible, but standard harmless builtins such as ord(...) plus math and unicodedata are also available.
  - For count, how many, total number, sum, average, minimum, and maximum questions, execute the calculation and surface the real result with log_output(...) or print(...).
-- web_search is for looking up information, details, math constants, or external facts not present in the dataset context.
+- web_search is only for current or external information that is not present in the uploaded dataset.
+- Never use web_search for calculations, summaries, schema questions, missing values, correlations, charts, or any request answerable from the dataset tools.
+- When combining dataset evidence with web results, calculate the dataset finding first and clearly distinguish external context from dataset findings.
 - Never delete rows unless the user explicitly asked to delete, drop, remove, or deduplicate rows.
 - When a tool fails, acknowledge the failure briefly in thought and choose a corrected next action.
 
@@ -200,6 +203,7 @@ class ToolExecution:
     code: str
     error: str | None = None
     created_output: bool = False
+    sources: list[dict[str, str]] | None = None
 
 
 def _truncate(value: Any, max_len: int = 220) -> str:
@@ -1011,10 +1015,6 @@ def _execute_schema_tool(
 
 
 def _execute_web_search_tool(rows: list[dict[str, Any]], args: dict[str, Any]) -> ToolExecution:
-    import os
-    import urllib.request
-    import urllib.error
-
     query = str(args.get("query") or "").strip()
     if not query:
         return ToolExecution(
@@ -1031,60 +1031,21 @@ def _execute_web_search_tool(rows: list[dict[str, Any]], args: dict[str, Any]) -
             error="Empty query error",
         )
 
-    api_key = os.getenv("TAVILY_API_KEY") or "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"
-    url = "https://api.tavily.com/search"
-    headers = {"Content-Type": "application/json"}
-    data = {
-        "api_key": api_key,
-        "query": query,
-        "include_answer": True,
-        "max_results": 5
-    }
-
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(data).encode("utf-8"),
-        headers=headers,
-        method="POST"
-    )
-
     try:
-        with urllib.request.urlopen(req, timeout=12) as response:
-            res_body = response.read().decode("utf-8")
-            res_json = json.loads(res_body)
-
-            answer = res_json.get("answer")
-            results = res_json.get("results") or []
-
-            obs_parts = []
-            if answer:
-                obs_parts.append(f"Tavily Answer: {answer}")
-
-            for i, r in enumerate(results, 1):
-                title = r.get("title", "No Title")
-                url_str = r.get("url", "No URL")
-                content = r.get("content", "No Content")
-                obs_parts.append(f"Result {i}: {title} ({url_str})\nSummary: {content}")
-
-            observation = "\n\n".join(obs_parts)
-            if not observation:
-                observation = "No search results found."
-
-            return ToolExecution(
-                rows=rows,
-                visualization=None,
-                query_output=None,
-                query_table_rows=None,
-                mutation=False,
-                highlight_indices=[],
-                highlighted_columns=[],
-                observation=observation[:800],
-                raw_observation=json.dumps(res_json)[:MAX_OBSERVATION_CHARS],
-                code=f"web_search(query={repr(query)})",
-                error=None,
-            )
-    except Exception as e:
-        err_msg = str(e)
+        payload = search_web(query)
+        sources = [{"title": item["title"], "url": item["url"]} for item in payload["results"]]
+        observation = "\n\n".join(
+            f"Result {index}: {item['title']} ({item['url']})\nSummary: {item['content']}"
+            for index, item in enumerate(payload["results"], 1)
+        ) or "No search results found."
+        return ToolExecution(
+            rows=rows, visualization=None, query_output=None, query_table_rows=None,
+            mutation=False, highlight_indices=[], highlighted_columns=[],
+            observation=observation[:1600], raw_observation=json.dumps(payload)[:MAX_OBSERVATION_CHARS],
+            code=f"web_search(query={repr(query)})", error=None, sources=sources,
+        )
+    except WebSearchError as exc:
+        err_msg = str(exc)
         return ToolExecution(
             rows=rows,
             visualization=None,
@@ -1257,6 +1218,7 @@ def _run_react_thinking_agent(
     latest_highlighted_columns: list[str] = []
     latest_observation = ""
     latest_created_output_rows: list[dict[str, Any]] | None = None
+    latest_sources: list[dict[str, str]] = []
     final_answer = ""
     final_table_title = "Thinking Result"
     repeated_planner_error_count = 0
@@ -1268,6 +1230,10 @@ def _run_react_thinking_agent(
             event_callback(dict(entry))
 
     for step_number in range(1, MAX_THINKING_STEPS + 1):
+        append_trace(_make_trace_entry(
+            kind="thought",
+            content="Planning the next evidence-gathering step.",
+        ))
         dataset_context = _build_dataset_context(working_rows)
         planner_message = _build_planner_message(
             prompt=prompt,
@@ -1362,6 +1328,16 @@ def _run_react_thinking_agent(
         if not isinstance(args, dict):
             args = {}
 
+        action_text = f"Running `{tool}` on the current working dataset."
+        append_trace(
+            _make_trace_entry(
+                kind="action",
+                content=action_text,
+                tool_name=tool,
+                tool_input=json.dumps(args),
+            )
+        )
+
         if tool == "inspect_schema":
             execution = _execute_schema_tool(working_rows, args, datasets=datasets)
         elif tool == "web_search":
@@ -1380,29 +1356,12 @@ def _run_react_thinking_agent(
                 )
             except Exception as exc:
                 message = f"Tool selection failed: {_truncate(exc, 180)}"
-                append_trace(
-                    _make_trace_entry(
-                        kind="action",
-                        content=f"Attempting `{tool}` on the current working dataset.",
-                        tool_name=tool or "unknown",
-                        tool_input=json.dumps(args),
-                    )
-                )
                 append_trace(_make_trace_entry(kind="observation", content=message, status="error"))
                 transcript_for_model.append({"kind": "action", "tool": tool or "unknown", "input": json.dumps(args)})
                 transcript_for_model.append({"kind": "observation", "content": message, "status": "error"})
                 latest_observation = message
                 continue
 
-        action_text = f"Running `{tool}` on the current working dataset."
-        append_trace(
-            _make_trace_entry(
-                kind="action",
-                content=action_text,
-                tool_name=tool,
-                tool_input=execution.code,
-            )
-        )
         append_trace(
             _make_trace_entry(
                 kind="observation",
@@ -1552,6 +1511,7 @@ def run_thinking_agent(
     latest_observation = ""
     latest_created_output_rows: list[dict[str, Any]] | None = None
     planned_final_answer = ""
+    latest_sources: list[dict[str, str]] = []
     final_table_title = "Thinking Result"
     mutation_applied_any = False
 
@@ -1614,6 +1574,7 @@ def run_thinking_agent(
             "highlighted_columns": latest_highlighted_columns,
             "thinking_trace": transcript,
             "token_usage": token_usage,
+            "sources": latest_sources,
         }
 
     planner_message = _build_planner_message(
@@ -1624,6 +1585,10 @@ def run_thinking_agent(
         selection_context=selection_context,
     )
 
+    append_trace(_make_trace_entry(
+        kind="thought",
+        content="Reviewing the dataset context and planning the evidence checks.",
+    ))
     try:
         payload, usage = _invoke_planner_step(
             model_name=model_name,
@@ -1662,6 +1627,13 @@ def run_thinking_agent(
         if reason:
             action_text = f"{action_text} {reason}"
 
+        append_trace(_make_trace_entry(
+            kind="action",
+            content=action_text,
+            tool_name=tool,
+            tool_input=json.dumps(args),
+        ))
+
         if tool == "inspect_schema":
             execution = _execute_schema_tool(working_rows, args, datasets=datasets)
         elif tool == "web_search":
@@ -1680,21 +1652,9 @@ def run_thinking_agent(
                 )
             except Exception as exc:
                 latest_observation = f"Tool selection failed: {_truncate(exc, 180)}"
-                append_trace(_make_trace_entry(
-                    kind="action",
-                    content=action_text,
-                    tool_name=tool or "unknown",
-                    tool_input=json.dumps(args),
-                ))
                 append_trace(_make_trace_entry(kind="observation", content=latest_observation, status="error"))
                 break
 
-        append_trace(_make_trace_entry(
-            kind="action",
-            content=action_text,
-            tool_name=tool,
-            tool_input=execution.code,
-        ))
         append_trace(_make_trace_entry(
             kind="observation",
             content=execution.observation,
@@ -1725,6 +1685,10 @@ def run_thinking_agent(
         latest_highlight_indices = execution.highlight_indices or latest_highlight_indices
         latest_highlighted_columns = execution.highlighted_columns or latest_highlighted_columns
         latest_observation = execution.observation
+        if execution.sources:
+            for source in execution.sources:
+                if source not in latest_sources:
+                    latest_sources.append(source)
 
         if execution.error:
             break

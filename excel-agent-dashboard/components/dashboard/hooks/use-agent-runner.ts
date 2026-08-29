@@ -89,6 +89,7 @@ function normalizeFinalPayload(finalPayload: AgentExecuteResponse): AgentRunSucc
     query_output: finalPayload.query_output,
     table_links: responseTables.map((table) => ({ id: table.id, title: table.title })),
     thinkingTrace: finalPayload.thinking_trace,
+    sources: finalPayload.sources,
   }
 
   return {

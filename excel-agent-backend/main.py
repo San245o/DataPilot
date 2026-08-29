@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from datetime import datetime, timezone
+from itertools import count
 import json
 import logging
 from queue import Queue
@@ -15,7 +17,8 @@ from dotenv import load_dotenv
 
 from agent import supports_thinking_model
 from auth import get_current_user
-from schemas import AgentRequest, AgentResponse, DatasetRegisterRequest, DatasetRegisterResponse
+from schemas import AgentRequest, AgentResponse, DatasetRegisterRequest, DatasetRegisterResponse, ReportRequest
+from report import generate_auto_report
 from thinking import run_thinking_agent
 from workflow import build_workflow
 
@@ -166,6 +169,7 @@ def _build_agent_response(payload: dict[str, Any], default_rows: list[dict[str, 
         highlighted_columns=_normalize_highlighted_columns(_safe_get(payload, "highlighted_columns", [])),
         thinking_trace=_safe_get(payload, "thinking_trace", []),
         token_usage=_safe_get(payload, "token_usage"),
+        sources=_safe_get(payload, "sources", []),
     )
 
 
@@ -384,4 +388,77 @@ def execute_thinking_agent_stream(
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+@app.post("/agent/report/stream")
+def execute_auto_report_stream(
+    payload: ReportRequest,
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> StreamingResponse:
+    """Generate a structured report against one immutable, user-owned dataset snapshot."""
+    user_id = current_user.get("user_id", "anonymous")
+    cached = _get_cached_dataset(payload.dataset_id, requesting_user_id=user_id)
+    rows = list(cached.get("rows") or [])
+    if not rows:
+        raise HTTPException(status_code=400, detail="The active dataset is empty.")
+    model_name = _require_model_name(payload.model)
+    if not supports_thinking_model(model_name):
+        raise HTTPException(status_code=400, detail="Auto Report requires a Thinking Mode model.")
+
+    # Capture identity, name, and rows before the background thread starts. Later UI
+    # dataset changes cannot retarget this report run.
+    dataset_id = payload.dataset_id
+    dataset_name = str(cached.get("name") or "Dataset")
+    frozen_rows = [dict(row) for row in rows]
+    event_queue: Queue[dict[str, Any] | None] = Queue()
+    sequence = count(1)
+
+    def queue_trace(entry: dict[str, Any]) -> None:
+        event_queue.put({
+            "type": "trace",
+            "entry": {
+                **entry,
+                "sequence": next(sequence),
+                "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            },
+        })
+
+    queue_trace({"kind": "thought", "content": "Starting report analysis for the active dataset.", "status": "completed"})
+    logger.info("report stream started dataset=%s user=%s rows=%s", dataset_id, user_id, len(frozen_rows))
+
+    def runner() -> None:
+        try:
+            report = generate_auto_report(
+                dataset_id=dataset_id,
+                dataset_name=dataset_name,
+                rows=frozen_rows,
+                model_name=model_name,
+                event_callback=queue_trace,
+            )
+            event_queue.put({"type": "final", "payload": report})
+            logger.info("report final event queued dataset=%s", dataset_id)
+        except Exception as exc:
+            logger.exception("agent.report.stream failed dataset=%s", dataset_id)
+            queue_trace({"kind": "observation", "content": "Report generation failed before the final report could be completed.", "status": "error"})
+            event_queue.put({"type": "error", "error": str(exc) or "Auto Report failed"})
+        finally:
+            event_queue.put(None)
+            logger.info("report stream sentinel queued dataset=%s", dataset_id)
+
+    threading.Thread(target=runner, daemon=True).start()
+
+    def stream():
+        try:
+            while True:
+                item = event_queue.get()
+                if item is None:
+                    break
+                yield json.dumps(item, default=str) + "\n"
+        finally:
+            logger.info("report stream closed dataset=%s", dataset_id)
+
+    return StreamingResponse(
+        stream(), media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 logger = logging.getLogger("excel-agent-backend.model")
+MODEL_REQUEST_TIMEOUT_SECONDS = 45
 
 SYSTEM_PROMPT_BASE = """You are a data analysis agent using pandas and plotly.
 
@@ -486,6 +487,7 @@ def _invoke_model(*, model_name: str, system_prompt: str, user_message: str) -> 
             messages=[SystemMessage(system_prompt), UserMessage(user_message)],
             temperature=0,
             model=normalized_model,
+            timeout=MODEL_REQUEST_TIMEOUT_SECONDS,
         )
         raw = response.choices[0].message.content or ""
         if hasattr(response, "usage") and response.usage:
@@ -503,7 +505,9 @@ def _invoke_model(*, model_name: str, system_prompt: str, user_message: str) -> 
 
         client = OpenAI(
             base_url="https://integrate.api.nvidia.com/v1",
-            api_key=nvidia_api_key
+            api_key=nvidia_api_key,
+            timeout=MODEL_REQUEST_TIMEOUT_SECONDS,
+            max_retries=0,
         )
 
         messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_message}]
@@ -550,11 +554,10 @@ def _invoke_model(*, model_name: str, system_prompt: str, user_message: str) -> 
     ):
         generation_config["response_mime_type"] = "application/json"
 
-    try:
-        response = model.generate_content([system_prompt, user_message], generation_config=generation_config)  # type: ignore
-    except Exception:
-        # Fall back to basic generation if a model does not support response MIME controls.
-        response = model.generate_content([system_prompt, user_message], generation_config={"temperature": 0})  # type: ignore
+    response = model.generate_content(
+        [system_prompt, user_message], generation_config=generation_config,
+        request_options={"timeout": MODEL_REQUEST_TIMEOUT_SECONDS},
+    )  # type: ignore
 
     raw = response.text or ""
     if hasattr(response, "usage_metadata") and response.usage_metadata:

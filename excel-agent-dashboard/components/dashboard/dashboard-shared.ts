@@ -84,6 +84,8 @@ export type DataSelectionContext = {
 export type ThinkingTraceEntry = {
   kind: "thought" | "action" | "observation"
   content: string
+  sequence?: number
+  timestamp?: string
   tool_name?: string
   tool_input?: string
   details?: string
@@ -125,6 +127,7 @@ export type AgentExecuteResponse = {
   highlighted_columns?: HighlightedColumn[]
   thinking_trace?: ThinkingTraceEntry[]
   token_usage?: TokenUsageSummary
+  sources?: Array<{ title: string; url: string }>
   detail?: string
 }
 
@@ -137,6 +140,7 @@ export type ChatMessage = {
   thinkingTrace?: ThinkingTraceEntry[]
   modelLabel?: string
   isStreaming?: boolean
+  sources?: Array<{ title: string; url: string }>
 }
 
 export type VizWidget = {

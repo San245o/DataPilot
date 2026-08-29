@@ -791,11 +791,37 @@ export function AgentDashboard() {
     downloadBlob(zip, "datapilot-workspace.zip")
   }, [datasets])
 
-  const handleAutoReport = useCallback(() => {
-    if (!activeDataset) return
-    sessionStorage.setItem("report_dataset", JSON.stringify(activeDataset))
+  const handleAutoReport = useCallback(async () => {
+    if (!activeDataset || activeDataset.rows.length === 0) {
+      setError("Upload a dataset before generating an Auto Report.")
+      return
+    }
+    let reportDataset = activeDataset
+    if (activeDataset.id === initialDataset.id) {
+      try {
+        const registered = await registerDataset(activeDataset.displayName, activeDataset.rows)
+        reportDataset = { ...activeDataset, id: registered.dataset_id }
+        setDatasets([reportDataset])
+        setActiveDatasetId(reportDataset.id)
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : "Could not register the active dataset.")
+        return
+      }
+    }
+    const reportModel = modelName === "models/gemma-4-31b-it" || modelName === "minimaxai/minimax-m2.5"
+      ? modelName
+      : DEFAULT_THINKING_MODEL
+    sessionStorage.setItem("report_target", JSON.stringify({
+      datasetId: reportDataset.id,
+      displayName: reportDataset.displayName,
+      fileName: reportDataset.fileName,
+      sheetName: reportDataset.sheetName,
+      rowCount: reportDataset.rowCount,
+      columnCount: reportDataset.columnCount,
+      model: reportModel,
+    }))
     router.push("/report")
-  }, [activeDataset, router])
+  }, [activeDataset, modelName, router, setError])
 
   const handleDeleteDataset = useCallback((datasetId: string) => {
     const nextDatasets = datasets.filter((dataset) => dataset.id !== datasetId)
@@ -1229,7 +1255,7 @@ export function AgentDashboard() {
             <button
               type="button"
               onClick={handleDownloadWorkspaceZip}
-              disabled={datasets.length === 0}
+              disabled={!activeDataset || activeDataset.rows.length === 0}
               className={`w-full group flex items-center gap-2.5 rounded-lg border border-dashed border-border p-2.5 text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground hover:bg-accent/50 disabled:opacity-50 disabled:cursor-not-allowed ${
                 sidebarCollapsed ? "justify-center" : ""
               }`}
