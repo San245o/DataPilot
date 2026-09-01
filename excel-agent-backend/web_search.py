@@ -3,12 +3,26 @@ from __future__ import annotations
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
 
 class WebSearchError(RuntimeError):
     """A recoverable web-search failure."""
+
+
+def _authority_score(url: str) -> int:
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    authoritative = (
+        "worldbank.org", "un.org", "who.int", "oecd.org", "imf.org",
+        "europa.eu", "data.gov", "gov.br", "ibge.gov.br",
+    )
+    if any(host == domain or host.endswith(f".{domain}") for domain in authoritative):
+        return 2
+    if host.endswith(".gov") or ".gov." in host or host.endswith(".edu"):
+        return 1
+    return 0
 
 
 def search_web(query: str, *, max_results: int = 5, timeout_seconds: int = 12) -> dict[str, Any]:
@@ -48,4 +62,5 @@ def search_web(query: str, *, max_results: int = 5, timeout_seconds: int = 12) -
         if title and url.startswith(("https://", "http://")):
             results.append({"title": title[:200], "url": url, "content": content})
 
+    results.sort(key=lambda item: _authority_score(item["url"]), reverse=True)
     return {"query": clean_query, "results": results}

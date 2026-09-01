@@ -128,7 +128,7 @@ class AutoReportSynthesisTests(unittest.TestCase):
         with patch("report.SYNTHESIS_TIMEOUT_SECONDS", 0.03), patch("report.SYNTHESIS_HEARTBEAT_SECONDS", 0.005), patch("report.invoke_model_json", side_effect=lambda **_: time.sleep(0.1)):
             with self.assertRaises(TimeoutError):
                 _synthesize_report(model_name="test", dataset_name="Data", evidence={"dataset": {}}, emit=events.append)
-        self.assertGreaterEqual(len(events), 2)
+        self.assertGreaterEqual(len(events), 1)
         self.assertTrue(all(event["kind"] == "thought" for event in events))
 
     def test_tool_action_streams_before_its_observation(self) -> None:

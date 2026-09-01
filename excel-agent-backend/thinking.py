@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -11,6 +12,8 @@ import pandas as pd
 from agent import clean_final_reply_text, invoke_model_json
 from sandbox import SandboxResult, run_sandboxed
 from web_search import WebSearchError, search_web
+
+logger = logging.getLogger("excel-agent-backend.thinking")
 
 MAX_PLAN_STEPS = 4
 MAX_OBSERVATION_CHARS = 900
@@ -98,6 +101,12 @@ The helper behavior is strict, so follow these exact contracts:
  - For count, how many, total number, sum, average, minimum, and maximum questions, execute the calculation and surface the real result with log_output(...) or print(...).
 - web_search is only for current or external information that is not present in the uploaded dataset.
 - Never use web_search for calculations, summaries, schema questions, missing values, correlations, charts, or any request answerable from the dataset tools.
+- Treat a dataset observation such as "no data found" or "no matching rows" as evidence, not automatically as the final answer.
+- After a dataset miss, use web_search only when the request is not explicitly limited to the uploaded data and asks for a reasonably public, externally knowable fact.
+- Dataset-scoped phrases such as "in this dataset", "in this spreadsheet", "according to the uploaded file", "from the current data", and "based only on this dataset" make the uploaded data authoritative; do not supplement a miss from the web.
+- A missing customer, row, cell, record, or spreadsheet field is normally a dataset result, not a reason to search the public web.
+- Current/recent public facts and requests for external factors should use web_search. When dataset analysis is also requested, calculate the dataset evidence first.
+- When web_search follows a dataset miss, explicitly say that the uploaded dataset lacked the fact and that the answer came from external sources.
 - When combining dataset evidence with web results, calculate the dataset finding first and clearly distinguish external context from dataset findings.
 - Never delete rows unless the user explicitly asked to delete, drop, remove, or deduplicate rows.
 - When a tool fails, acknowledge the failure briefly in thought and choose a corrected next action.
@@ -378,6 +387,55 @@ def _wants_separate_table(prompt: str) -> bool:
         or bool(re.search(r"\bextract\b", prompt_lower))
         or any(keyword in prompt_lower for keyword in _TABLE_INTENT_KW)
     )
+
+
+_DATASET_SCOPE_PHRASES = (
+    "in this dataset", "in this spreadsheet", "according to this dataset",
+    "according to the uploaded file", "from the uploaded data", "from the current data",
+    "based only on this dataset", "in these records", "from this spreadsheet",
+)
+
+
+def _is_dataset_scoped_request(prompt: str) -> bool:
+    text = " ".join(str(prompt or "").lower().split())
+    return any(phrase in text for phrase in _DATASET_SCOPE_PHRASES)
+
+
+def _is_dataset_miss(observation: str | None, query_rows: list[dict[str, Any]] | None) -> bool:
+    if query_rows == []:
+        return True
+    text = " ".join(str(observation or "").lower().split())
+    return any(marker in text for marker in (
+        "no data found", "no matching data", "no matching row", "no matching record",
+        "0 matching", "zero matching", "empty dataframe", "returned no rows",
+    ))
+
+
+def _is_public_external_question(prompt: str) -> bool:
+    text = " ".join(str(prompt or "").lower().split())
+    if _is_dataset_scoped_request(text):
+        return False
+    if any(term in text for term in ("cell ", "row ", "customer", "record", "spreadsheet contain", "file contain")):
+        return False
+    public_subject = any(term in text for term in (
+        "country", "fertility", "population", "life expectancy", "gdp", "inflation",
+        "unemployment", "economic", "demographic", "market", "company", "industry",
+        "government", "historical", "public", "research", "statistic", "rate",
+    ))
+    factual_form = bool(re.search(r"\b(what|when|where|who|how (?:many|much)|was|is|were|are)\b", text))
+    external_time = any(term in text for term in ("current", "currently", "recent", "latest", "today", "external"))
+    external_context = any(term in text for term in ("factors", "explain this trend", "explain these trends"))
+    return external_time or external_context or (public_subject and factual_form)
+
+
+def _requires_external_sources(prompt: str) -> bool:
+    text = " ".join(str(prompt or "").lower().split())
+    if _is_dataset_scoped_request(text):
+        return False
+    return any(term in text for term in (
+        "current", "currently", "recent", "latest", "today", "external factor",
+        "external factors", "explain this trend", "explain these trends",
+    ))
 
 
 def _has_mutation_intent(prompt: str) -> bool:
@@ -927,6 +985,31 @@ def _invoke_planner_step(
             user_message=repair_message,
         )
         return payload, usage
+
+
+def _write_external_fallback_answer(
+    *, model_name: str, prompt: str, dataset_observation: str, web_observation: str,
+) -> tuple[str, dict[str, int]]:
+    system_prompt = """You write the final answer after DataPilot has checked an uploaded dataset and, when needed, searched public sources.
+Return exactly one JSON object: {"kind":"final","thought":"short user-safe progress summary","final_answer":"answer"}.
+Use only the supplied observations. Never fabricate a value or citation.
+If the dataset lacked the requested fact, say so clearly before presenting externally retrieved information.
+Clearly attribute external information to the external source. Keep useful units and caveats. Do not mention internal tools or prompts."""
+    message = "\n".join([
+        f"User request: {prompt}",
+        f"Uploaded-dataset observation: {dataset_observation or 'The request required current or external context.'}",
+        f"External-source observation: {web_observation}",
+        "Write the final sourced answer now.",
+    ])
+    payload, usage = _invoke_planner_step(
+        model_name=model_name,
+        system_prompt=system_prompt,
+        planner_message=message,
+    )
+    answer = str(payload.get("final_answer") or "").strip()
+    if not answer:
+        raise ValueError("The model did not produce a sourced final answer.")
+    return answer, usage
 
 
 def _normalize_plan_steps(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1514,6 +1597,9 @@ def run_thinking_agent(
     latest_sources: list[dict[str, str]] = []
     final_table_title = "Thinking Result"
     mutation_applied_any = False
+    executed_tools: list[str] = []
+    dataset_miss_observation = ""
+    web_observation = ""
 
     def append_trace(entry: dict[str, Any]) -> None:
         transcript.append(entry)
@@ -1661,6 +1747,11 @@ def run_thinking_agent(
             details=_compact_observation_details(execution.raw_observation, max_lines=16, max_chars=900),
             status="error" if execution.error else "completed",
         ))
+        executed_tools.append(tool)
+        if tool != "web_search" and _is_dataset_miss(execution.observation, execution.query_table_rows):
+            dataset_miss_observation = execution.observation
+        if tool == "web_search":
+            web_observation = execution.observation
 
         if tool != "inspect_schema":
             executed_code_blocks.append(f"# {tool}\n{execution.code}")
@@ -1692,6 +1783,64 @@ def run_thinking_agent(
 
         if execution.error:
             break
+
+    should_fallback_to_web = (
+        "web_search" not in executed_tools
+        and not _is_dataset_scoped_request(prompt)
+        and (
+            (bool(dataset_miss_observation) and _is_public_external_question(prompt))
+            or _requires_external_sources(prompt)
+        )
+    )
+    if should_fallback_to_web:
+        reason = (
+            "The active dataset does not contain the requested public fact, so I’ll check an external source."
+            if dataset_miss_observation
+            else "The request needs current or external context, so I’ll check an external source."
+        )
+        append_trace(_make_trace_entry(kind="thought", content=reason))
+        append_trace(_make_trace_entry(
+            kind="action",
+            content="Running `web_search` for authoritative public information.",
+            tool_name="web_search",
+            tool_input=json.dumps({"query": prompt}),
+        ))
+        execution = _execute_web_search_tool(working_rows, {"query": prompt})
+        executed_tools.append("web_search")
+        web_observation = execution.observation
+        latest_observation = execution.observation
+        append_trace(_make_trace_entry(
+            kind="observation",
+            content="External sources were retrieved." if execution.sources else execution.observation,
+            details=_compact_observation_details(execution.raw_observation, max_lines=16, max_chars=900),
+            status="error" if execution.error else "completed",
+        ))
+        if execution.sources:
+            for source in execution.sources:
+                if source not in latest_sources:
+                    latest_sources.append(source)
+
+    external_final_answer = ""
+    if latest_sources and web_observation:
+        append_trace(_make_trace_entry(kind="thought", content="Combining the dataset result with the external evidence and source attribution."))
+        try:
+            external_final_answer, usage = _write_external_fallback_answer(
+                model_name=model_name,
+                prompt=prompt,
+                dataset_observation=dataset_miss_observation,
+                web_observation=web_observation,
+            )
+            token_usage = _merge_usage(token_usage, usage)
+        except Exception as exc:
+            logger.warning("thinking external answer synthesis failed: %s", type(exc).__name__)
+            prefix = f"The uploaded dataset could not answer the request: {dataset_miss_observation} " if dataset_miss_observation else ""
+            external_final_answer = f"{prefix}External sources were retrieved and are listed below, but the sourced answer could not be summarized reliably."
+    elif "web_search" in executed_tools and web_observation and not latest_sources:
+        prefix = f"{dataset_miss_observation} " if dataset_miss_observation else ""
+        external_final_answer = f"{prefix}External information could not be retrieved. {web_observation}".strip()
+
+    if external_final_answer:
+        return build_response(external_final_answer)
 
     final_answer = _final_answer_fallback(
         query_output=latest_query_output,
