@@ -56,7 +56,7 @@ export async function GET(request: Request) {
       authProvider: "Microsoft Entra External ID",
     });
 
-    return NextResponse.redirect(new URL("/dashboard", requestUrl.origin));
+    return NextResponse.redirect(new URL("/home", requestUrl.origin));
   } catch (err: unknown) {
     console.error("MSAL Node token exchange error:", err);
     return NextResponse.redirect(new URL("/login?error=token_exchange_failed", requestUrl.origin));

@@ -133,7 +133,7 @@ export function SignUpForm() {
       } else if (res.message) {
         setSuccessMessage(res.message);
       } else {
-        router.push("/dashboard");
+        router.push("/home");
         router.refresh();
       }
     } catch (err: unknown) {
