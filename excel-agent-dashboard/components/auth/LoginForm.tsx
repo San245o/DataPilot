@@ -87,7 +87,7 @@ export function LoginForm() {
           general: res.error || "Failed to sign in. Please check your credentials.",
         }));
       } else {
-        router.push("/dashboard");
+        router.push("/home");
         router.refresh();
       }
     } catch (err: unknown) {

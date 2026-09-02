@@ -51,5 +51,5 @@ export async function GET(request: Request) {
     accessToken: `google_token_${devUserId}`,
   });
 
-  return NextResponse.redirect(new URL("/dashboard", origin));
+  return NextResponse.redirect(new URL("/home", origin));
 }
