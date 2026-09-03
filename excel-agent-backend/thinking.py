@@ -407,7 +407,8 @@ def _is_dataset_miss(observation: str | None, query_rows: list[dict[str, Any]] |
     text = " ".join(str(observation or "").lower().split())
     return any(marker in text for marker in (
         "no data found", "no matching data", "no matching row", "no matching record",
-        "0 matching", "zero matching", "empty dataframe", "returned no rows",
+        "0 matching", "zero matching", "empty dataframe", "returned no rows", "returned 0 rows",
+        "[dataframe: 0 rows", "no results found",
     ))
 
 
