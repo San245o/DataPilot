@@ -71,6 +71,7 @@ function Navbar() {
   }, []);
 
   return (
+<<<<<<< HEAD
     <header
       className={`fixed inset-x-0 top-0 z-50 transition-all duration-300 ${
         scrolled
@@ -112,6 +113,13 @@ function Navbar() {
           >
             Sign Up
           </Link>
+=======
+    <div className="font-sans antialiased text-[#dae2fd] bg-[#020617] min-h-screen overflow-x-hidden selection:bg-[#4edea3]/30">
+      {/* Global Background Shader */}
+      <div className="fixed inset-0 z-0 pointer-events-none">
+        <div className="w-full h-full opacity-40">
+          <canvas ref={canvasRef} className="block w-full h-full"></canvas>
+>>>>>>> 388280c (Fix SSR hydration mismatch and remove unused datapilot-ai-suite prototype)
         </div>
 
         {/* Mobile Menu Button */}

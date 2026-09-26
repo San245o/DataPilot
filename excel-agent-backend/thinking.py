@@ -1115,6 +1115,42 @@ def _execute_web_search_tool(rows: list[dict[str, Any]], args: dict[str, Any]) -
             error="Empty query error",
         )
 
+<<<<<<< HEAD
+=======
+    api_key = (os.getenv("TAVILY_API_KEY") or "").strip()
+    if not api_key:
+        message = "Tavily web search is not configured. Set TAVILY_API_KEY in the backend .env file."
+        return ToolExecution(
+            rows=rows,
+            visualization=None,
+            query_output=None,
+            query_table_rows=None,
+            mutation=False,
+            highlight_indices=[],
+            highlighted_columns=[],
+            observation=message,
+            raw_observation=message,
+            code=f"web_search(query={repr(query)})",
+            error="TAVILY_API_KEY not set",
+        )
+
+    url = "https://api.tavily.com/search"
+    headers = {"Content-Type": "application/json"}
+    data = {
+        "api_key": api_key,
+        "query": query,
+        "include_answer": True,
+        "max_results": 5
+    }
+
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(data).encode("utf-8"),
+        headers=headers,
+        method="POST"
+    )
+
+>>>>>>> 388280c (Fix SSR hydration mismatch and remove unused datapilot-ai-suite prototype)
     try:
         payload = search_web(query)
         sources = [{"title": item["title"], "url": item["url"]} for item in payload["results"]]
