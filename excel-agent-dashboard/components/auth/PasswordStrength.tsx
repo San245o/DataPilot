@@ -30,13 +30,13 @@ export function PasswordStrength({ value }: { value: string }) {
           <span
             key={i}
             className={`h-1.5 flex-1 rounded-full transition-colors ${
-              i <= score ? COLORS[score] : "bg-slate-200"
+              i <= score ? COLORS[score] : "bg-slate-800"
             }`}
           />
         ))}
       </div>
-      <p className="text-xs text-slate-500">
-        Password strength: <span className="font-medium text-slate-900">{LABELS[score]}</span>
+      <p className="text-[11px] text-slate-400">
+        Password strength: <span className="font-medium text-slate-200">{LABELS[score]}</span>
       </p>
     </div>
   );

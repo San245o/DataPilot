@@ -10,12 +10,13 @@ from uuid import uuid4
 import pandas as pd
 
 from agent import clean_final_reply_text, invoke_model_json
-from sandbox import SandboxResult, run_sandboxed
+from sandbox import SandboxResult, heal_code_escaping_glitches, run_sandboxed
 from web_search import WebSearchError, search_web
 
 logger = logging.getLogger("excel-agent-backend.thinking")
 
 MAX_PLAN_STEPS = 4
+MAX_THINKING_STEPS = 8
 MAX_OBSERVATION_CHARS = 900
 MAX_CODE_PREVIEW_CHARS = 900
 MAX_OBSERVATION_TABLE_ROWS = 10
@@ -108,6 +109,7 @@ The helper behavior is strict, so follow these exact contracts:
 - Current/recent public facts and requests for external factors should use web_search. When dataset analysis is also requested, calculate the dataset evidence first.
 - When web_search follows a dataset miss, explicitly say that the uploaded dataset lacked the fact and that the answer came from external sources.
 - When combining dataset evidence with web results, calculate the dataset finding first and clearly distinguish external context from dataset findings.
+- When the user asks to search the web and then add, insert, or modify rows/columns (e.g. "using web search add 3 rows of india"), plan ONLY web_search first. Do NOT invent or guess values in execute_python beforehand. The actual retrieved web results will be provided in phase 2 to generate the modification code with real numbers.
 - Never delete rows unless the user explicitly asked to delete, drop, remove, or deduplicate rows.
 - When a tool fails, acknowledge the failure briefly in thought and choose a corrected next action.
 
@@ -116,6 +118,7 @@ The helper behavior is strict, so follow these exact contracts:
 
 THINKING_JSON_EXAMPLES = """VALID JSON EXAMPLES:
 {"kind":"plan","thought":"I can compute this directly in Python and return a result table.","steps":[{"tool":"execute_python","args":{"code":"summary_df = df.groupby('Category', dropna=False).size().reset_index(name='Count')\\nlog_output(summary_df)\\nresult_df=df"},"reason":"Create the grouped table."}],"table_title":"Summary Table"}
+{"kind":"plan","thought":"I will search the web for the required external statistics first before adding the rows.","steps":[{"tool":"web_search","args":{"query":"India fertility rate life expectancy population size 2000 2005 2010"},"reason":"Retrieve real statistics for India."}],"table_title":"Demographics"}
 {"kind":"plan","thought":"The schema context is not enough, so I will inspect the active dataset first.","steps":[{"tool":"inspect_schema","args":{"sample_rows":2},"reason":"Check columns and dtypes."}],"table_title":"Schema"}
 {"kind":"final","thought":"I have the executed result and can answer directly.","final_answer":"The count is 0.","table_title":"Count Result"}
 """
@@ -213,6 +216,7 @@ class ToolExecution:
     error: str | None = None
     created_output: bool = False
     sources: list[dict[str, str]] | None = None
+    visualizations: list[dict[str, Any]] | None = None
 
 
 def _truncate(value: Any, max_len: int = 220) -> str:
@@ -222,6 +226,21 @@ def _truncate(value: Any, max_len: int = 220) -> str:
     if len(text) <= max_len:
         return text
     return text[: max_len - 3].rstrip() + "..."
+
+
+def _safe_int(value: Any, default: int, *, min_val: int | None = None, max_val: int | None = None) -> int:
+    try:
+        if value is None:
+            val = default
+        else:
+            val = int(value)
+    except (ValueError, TypeError):
+        val = default
+    if min_val is not None:
+        val = max(min_val, val)
+    if max_val is not None:
+        val = min(max_val, val)
+    return val
 
 
 def _trim_history(history: list[dict[str, str]], max_turns: int = 3) -> list[dict[str, str]]:
@@ -372,7 +391,7 @@ def _build_thinking_system_prompt(prompt: str) -> str:
     return "\n\n".join([
         "You are the Thinking Mode dataset agent.",
         THINKING_OUTPUT_CONTRACT,
-        "Keep planning short. For straightforward table, list, pivot, chart, summary, or calculation requests, use one execute_python action, then final.",
+        "Keep planning short. The working dataset context (row count, columns, dtypes, nulls, sample rows) is already provided to you. For questions, summaries, charts, calculations, and tables, use execute_python directly. Do not plan inspect_schema unless the user explicitly asks to view or inspect the schema.",
         intent_note,
         THINKING_EXECUTION_RULES,
         THINKING_JSON_EXAMPLES,
@@ -526,6 +545,7 @@ def _normalize_tool_name(value: Any) -> str:
 
 
 def _sanitize_execute_python(code: str) -> str:
+    code = heal_code_escaping_glitches(code)
     notes: list[str] = []
     sanitized_lines: list[str] = []
 
@@ -591,7 +611,7 @@ def _sanitize_execute_python(code: str) -> str:
 
 def _tool_code(tool: str, args: dict[str, Any]) -> tuple[str, str]:
     if tool == "print_table":
-        max_rows = max(1, min(int(args.get("max_rows", 10)), 50))
+        max_rows = _safe_int(args.get("max_rows"), default=10, min_val=1, max_val=50)
         call = f"print_table(max_rows={max_rows})"
         return f"{call}\nresult_df=df", call
 
@@ -599,7 +619,7 @@ def _tool_code(tool: str, args: dict[str, Any]) -> tuple[str, str]:
         query = str(args.get("query") or args.get("query_expr") or "").strip()
         if not query:
             raise ValueError("print_query requires a non-empty query")
-        max_rows = max(1, min(int(args.get("max_rows", 10)), 50))
+        max_rows = _safe_int(args.get("max_rows"), default=10, min_val=1, max_val=50)
         call = f"print_query({json.dumps(query)}, max_rows={max_rows})"
         return f"{call}\nresult_df=df", call
 
@@ -626,12 +646,16 @@ def _tool_code(tool: str, args: dict[str, Any]) -> tuple[str, str]:
         return f"{call}\nresult_df=df", call
 
     if tool == "delete_row":
-        index = int(args.get("index"))
+        index = _safe_int(args.get("index"), default=-1)
+        if index < 0:
+            raise ValueError("delete_row requires a valid non-negative index")
         call = f"delete_row({index})"
         return f"{call}\nresult_df=df", call
 
     if tool == "edit_cell":
-        row_index = int(args.get("row_index"))
+        row_index = _safe_int(args.get("row_index"), default=-1)
+        if row_index < 0:
+            raise ValueError("edit_cell requires a valid non-negative row_index")
         column = str(args.get("column") or "").strip()
         if not column:
             raise ValueError("edit_cell requires column")
@@ -663,13 +687,15 @@ def _tool_code(tool: str, args: dict[str, Any]) -> tuple[str, str]:
 
     if tool == "highlight_columns":
         columns = args.get("columns")
-        if not isinstance(columns, list) or not columns:
+        if isinstance(columns, str):
+            columns = [columns]
+        elif not isinstance(columns, list) or not columns:
             raise ValueError("highlight_columns requires columns")
         call = f"highlight_columns({_python_literal(columns)})"
         return f"{call}\nresult_df=df", call
 
     if tool == "table_to_csv":
-        max_rows = max(1, min(int(args.get("max_rows", 100)), 500))
+        max_rows = _safe_int(args.get("max_rows"), default=100, min_val=1, max_val=500)
         call = f"table_to_csv(max_rows={max_rows})"
         return f"{call}\nresult_df=df", call
 
@@ -677,6 +703,7 @@ def _tool_code(tool: str, args: dict[str, Any]) -> tuple[str, str]:
         code = str(args.get("code") or args.get("python") or "").strip()
         if not code:
             raise ValueError("execute_python requires code")
+        code = heal_code_escaping_glitches(code)
         sanitized_code = _sanitize_execute_python(code)
         return _ensure_result_df(sanitized_code), sanitized_code
 
@@ -1013,6 +1040,64 @@ Clearly attribute external information to the external source. Keep useful units
     return answer, usage
 
 
+def _repair_python_code(
+    *,
+    model_name: str,
+    original_code: str,
+    error_message: str,
+    dataset_columns: list[str] | None = None,
+) -> tuple[str, str, dict[str, int]]:
+    system_prompt = """You are an expert Python debugger for DataPilot.
+A Python snippet executed in a pandas sandbox failed with a syntax or runtime error.
+Your job is to provide a quick single-line or minimal fix for the code.
+Return exactly one JSON object:
+{"thought": "concise explanation of the fix", "code": "the complete corrected Python code"}
+Rules:
+1. Return ONLY the JSON object. No markdown fences.
+2. The code runs in a sandbox where `df` is the active pandas DataFrame.
+3. Pre-imported: pd, np, px, go, make_subplots, re, math. Never emit import statements.
+4. If modifying the dataset, ensure result_df = df is assigned at the end.
+5. If logging output, use log_output(...).
+6. Fix syntax glitches, unescaped characters, missing commas, or typos directly."""
+
+    cols_str = f"Dataset columns: {dataset_columns}\n" if dataset_columns else ""
+    user_message = f"""The following code failed:
+```python
+{original_code}
+```
+
+Error traceback / details:
+{error_message}
+
+{cols_str}Provide the quick corrected code now."""
+
+    try:
+        payload, usage = _invoke_planner_step(
+            model_name=model_name,
+            system_prompt=system_prompt,
+            planner_message=user_message,
+        )
+        repaired = str(payload.get("code") or "").strip()
+        thought = str(payload.get("thought") or "Corrected the Python syntax error.").strip()
+        if repaired:
+            repaired = heal_code_escaping_glitches(repaired)
+        return repaired, thought, usage
+    except Exception as exc:
+        logger.warning("Python self-correction failed: %s", exc)
+        return "", "", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+
+def _is_web_search_mutation_request(prompt: str) -> bool:
+    prompt_lower = prompt.lower()
+    has_web_intent = any(kw in prompt_lower for kw in (
+        "web search", "search the web", "search online", "search web", "google", "lookup online", "browse"
+    ))
+    has_mutation_intent = _has_mutation_intent(prompt) or any(kw in prompt_lower for kw in (
+        "add", "insert", "append", "populate", "update", "modify", "fill", "row", "rows", "column", "columns"
+    ))
+    return has_web_intent and has_mutation_intent
+
+
 def _normalize_plan_steps(payload: dict[str, Any]) -> list[dict[str, Any]]:
     kind = str(payload.get("kind") or "").strip().lower()
     raw_steps: Any
@@ -1068,7 +1153,7 @@ def _execute_schema_tool(
     *,
     datasets: dict[str, dict[str, Any]] | None = None,
 ) -> ToolExecution:
-    sample_count = max(1, min(int(args.get("sample_rows", 2)), 3))
+    sample_count = _safe_int(args.get("sample_rows"), default=2, min_val=1, max_val=3)
     dataset_context = _build_dataset_context(rows)
     dataset_context["sample_rows"] = dataset_context["sample_rows"][:sample_count]
     selected_contexts = _build_selected_dataset_contexts(datasets or {})
@@ -1115,42 +1200,6 @@ def _execute_web_search_tool(rows: list[dict[str, Any]], args: dict[str, Any]) -
             error="Empty query error",
         )
 
-<<<<<<< HEAD
-=======
-    api_key = (os.getenv("TAVILY_API_KEY") or "").strip()
-    if not api_key:
-        message = "Tavily web search is not configured. Set TAVILY_API_KEY in the backend .env file."
-        return ToolExecution(
-            rows=rows,
-            visualization=None,
-            query_output=None,
-            query_table_rows=None,
-            mutation=False,
-            highlight_indices=[],
-            highlighted_columns=[],
-            observation=message,
-            raw_observation=message,
-            code=f"web_search(query={repr(query)})",
-            error="TAVILY_API_KEY not set",
-        )
-
-    url = "https://api.tavily.com/search"
-    headers = {"Content-Type": "application/json"}
-    data = {
-        "api_key": api_key,
-        "query": query,
-        "include_answer": True,
-        "max_results": 5
-    }
-
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(data).encode("utf-8"),
-        headers=headers,
-        method="POST"
-    )
-
->>>>>>> 388280c (Fix SSR hydration mismatch and remove unused datapilot-ai-suite prototype)
     try:
         payload = search_web(query)
         sources = [{"title": item["title"], "url": item["url"]} for item in payload["results"]]
@@ -1192,7 +1241,24 @@ def _execute_sandbox_tool(
     selection_context: dict[str, Any] | None = None,
     is_multi_dataset_output: bool = False,
 ) -> ToolExecution:
-    code, display = _tool_code(tool, args)
+    try:
+        code, display = _tool_code(tool, args)
+    except Exception as exc:
+        err_msg = str(exc)
+        return ToolExecution(
+            rows=rows,
+            visualization=None,
+            query_output=None,
+            query_table_rows=None,
+            mutation=False,
+            highlight_indices=[],
+            highlighted_columns=[],
+            observation=f"Tool '{tool}' failed: {err_msg}",
+            raw_observation=err_msg,
+            code=f"{tool}({json.dumps(args)})",
+            error=err_msg,
+        )
+
     try:
         result = run_sandboxed(
             code,
@@ -1272,6 +1338,7 @@ def _execute_sandbox_tool(
         code=display,
         error=None,
         created_output=created_output,
+        visualizations=result.visualizations,
     )
 
 
@@ -1284,7 +1351,15 @@ def _final_answer_fallback(
     mutation_applied: bool,
     fallback_text: str,
     planned_answer: str | None = None,
+    has_error: bool = False,
 ) -> str:
+    if planned_answer and not has_error:
+        cleaned_planned = str(planned_answer).strip()
+        row_answer = _format_rows_for_answer(query_table_rows)
+        if row_answer and row_answer not in cleaned_planned:
+            return f"{cleaned_planned}\n\n{row_answer}"
+        return cleaned_planned
+
     parts: list[str] = []
     row_answer = _format_rows_for_answer(query_table_rows)
     if row_answer:
@@ -1300,8 +1375,6 @@ def _final_answer_fallback(
         parts.append("Created the visualization.")
     if parts:
         return " ".join(parts)
-    if planned_answer:
-        return str(planned_answer).strip()
     return fallback_text or "Done."
 
 
@@ -1511,13 +1584,14 @@ def _run_react_thinking_agent(
             latest_created_output_rows = execution.rows
             active_dataset_id = None
             datasets = {
+                **(datasets or {}),
                 "thinking_result": {
                     "name": "Thinking Result",
                     "rows": execution.rows,
                     "kind": "derived",
                     "source_dataset_ids": selected_dataset_ids,
                     "modified": True,
-                }
+                },
             }
             selected_dataset_contexts = _build_selected_dataset_contexts(datasets)
         latest_query_output = execution.query_output or latest_query_output
@@ -1536,6 +1610,7 @@ def _run_react_thinking_agent(
             created_output_rows=latest_created_output_rows,
             mutation_applied=working_rows != rows and latest_created_output_rows is None,
             fallback_text=fallback,
+            has_error=bool(execution.error if "execution" in locals() else False),
         )
     else:
         final_answer = clean_final_reply_text(
@@ -1625,6 +1700,7 @@ def run_thinking_agent(
 
     latest_query_output: str | None = None
     latest_visualization: dict[str, Any] | None = None
+    latest_visualizations: list[dict[str, Any]] = []
     latest_query_table_rows: list[dict[str, Any]] | None = None
     latest_highlight_indices: list[int] = []
     latest_highlighted_columns: list[str] = []
@@ -1637,6 +1713,7 @@ def run_thinking_agent(
     executed_tools: list[str] = []
     dataset_miss_observation = ""
     web_observation = ""
+    has_error = False
 
     def append_trace(entry: dict[str, Any]) -> None:
         transcript.append(entry)
@@ -1687,6 +1764,7 @@ def run_thinking_agent(
             "updated_datasets": updated_datasets,
             "created_datasets": created_datasets,
             "visualization": latest_visualization,
+            "visualizations": latest_visualizations,
             "query_output": latest_query_output,
             "query_tables": query_tables,
             "code": "\n\n".join(executed_code_blocks),
@@ -1740,6 +1818,11 @@ def run_thinking_agent(
         append_trace(_make_trace_entry(kind="observation", content=latest_observation, status="error"))
         return build_response(latest_observation)
 
+    if _is_web_search_mutation_request(prompt):
+        first_tool = _normalize_tool_name(plan_steps[0].get("tool")) if plan_steps else ""
+        if first_tool == "web_search" and len(plan_steps) > 1:
+            plan_steps = [plan_steps[0]]
+
     for step in plan_steps:
         tool = _normalize_tool_name(step.get("tool"))
         args = step.get("args")
@@ -1774,6 +1857,7 @@ def run_thinking_agent(
                     is_multi_dataset_output=is_multi_dataset_output,
                 )
             except Exception as exc:
+                has_error = True
                 latest_observation = f"Tool selection failed: {_truncate(exc, 180)}"
                 append_trace(_make_trace_entry(kind="observation", content=latest_observation, status="error"))
                 break
@@ -1799,16 +1883,23 @@ def run_thinking_agent(
             latest_created_output_rows = execution.rows
             active_dataset_id = None
             datasets = {
+                **(datasets or {}),
                 "thinking_result": {
                     "name": "Thinking Result",
                     "rows": execution.rows,
                     "kind": "derived",
                     "source_dataset_ids": selected_dataset_ids,
                     "modified": True,
-                }
+                },
             }
         latest_query_output = execution.query_output or latest_query_output
         latest_visualization = execution.visualization or latest_visualization
+        if execution.visualizations:
+            for v in execution.visualizations:
+                if v and v not in latest_visualizations:
+                    latest_visualizations.append(v)
+        elif latest_visualization and latest_visualization not in latest_visualizations:
+            latest_visualizations.append(latest_visualization)
         latest_query_table_rows = execution.query_table_rows or latest_query_table_rows
         latest_highlight_indices = execution.highlight_indices or latest_highlight_indices
         latest_highlighted_columns = execution.highlighted_columns or latest_highlighted_columns
@@ -1819,7 +1910,379 @@ def run_thinking_agent(
                     latest_sources.append(source)
 
         if execution.error:
-            break
+            original_code = execution.code or (args.get("code") if isinstance(args, dict) else "")
+            can_retry = (
+                tool in ("execute_python", "add_row", "edit_cell", "add_column")
+                or bool(original_code)
+            )
+            if can_retry and original_code:
+                append_trace(_make_trace_entry(
+                    kind="thought",
+                    content=f"Encountered an execution error: {_truncate(execution.error, 140)}. Requesting syntax self-correction.",
+                ))
+                repaired_code, repair_thought, repair_usage = _repair_python_code(
+                    model_name=model_name,
+                    original_code=original_code,
+                    error_message=execution.error,
+                    dataset_columns=list(working_rows[0].keys()) if working_rows else None,
+                )
+                token_usage = _merge_usage(token_usage, repair_usage)
+                if repaired_code:
+                    if repair_thought:
+                        append_trace(_make_trace_entry(kind="thought", content=repair_thought))
+                    append_trace(_make_trace_entry(
+                        kind="action",
+                        content="Retrying with self-corrected code.",
+                        tool_name="execute_python",
+                        tool_input=json.dumps({"code": repaired_code}),
+                    ))
+                    try:
+                        retry_execution = _execute_sandbox_tool(
+                            tool="execute_python",
+                            args={"code": repaired_code},
+                            prompt=prompt,
+                            rows=working_rows,
+                            datasets=datasets,
+                            active_dataset_id=active_dataset_id,
+                            selection_context=selection_context,
+                            is_multi_dataset_output=is_multi_dataset_output,
+                        )
+                        append_trace(_make_trace_entry(
+                            kind="observation",
+                            content=retry_execution.observation,
+                            details=_compact_observation_details(retry_execution.raw_observation, max_lines=16, max_chars=900),
+                            status="error" if retry_execution.error else "completed",
+                        ))
+                        if not retry_execution.error:
+                            execution = retry_execution
+                            executed_code_blocks.append(f"# execute_python (self-corrected)\n{execution.code}")
+                            working_rows = execution.rows
+                            mutation_applied_any = mutation_applied_any or execution.mutation
+                            if execution.created_output:
+                                latest_created_output_rows = execution.rows
+                                active_dataset_id = None
+                                datasets = {
+                                    **(datasets or {}),
+                                    "thinking_result": {
+                                        "name": "Thinking Result",
+                                        "rows": execution.rows,
+                                        "kind": "derived",
+                                        "source_dataset_ids": selected_dataset_ids,
+                                        "modified": True,
+                                    },
+                                }
+                            latest_query_output = execution.query_output or latest_query_output
+                            latest_visualization = execution.visualization or latest_visualization
+                            latest_query_table_rows = execution.query_table_rows or latest_query_table_rows
+                            latest_highlight_indices = execution.highlight_indices or latest_highlight_indices
+                            latest_highlighted_columns = execution.highlighted_columns or latest_highlighted_columns
+                            latest_observation = execution.observation
+                        else:
+                            has_error = True
+                            break
+                    except Exception:
+                        has_error = True
+                        break
+                else:
+                    has_error = True
+                    break
+            else:
+                has_error = True
+                break
+
+    is_schema_only_request = any(
+        kw in prompt.lower() for kw in ("schema", "columns", "structure", "dtypes", "inspect dataset", "data types")
+    )
+    if executed_tools == ["inspect_schema"] and not is_schema_only_request and not has_error:
+        append_trace(_make_trace_entry(
+            kind="thought",
+            content="Schema inspected. Proceeding to calculate and answer the user's request.",
+        ))
+        followup_message = _build_planner_message(
+            prompt=prompt,
+            history=trimmed_history,
+            dataset_context=_build_dataset_context(working_rows),
+            selected_dataset_contexts=_build_selected_dataset_contexts(datasets),
+            selection_context=selection_context,
+            transcript_for_model=[
+                {"kind": "action", "tool": "inspect_schema", "input": "sample_rows=2"},
+                {"kind": "observation", "content": latest_observation, "status": "completed"},
+            ],
+            step_number=2,
+        )
+        try:
+            followup_payload, followup_usage = _invoke_planner_step(
+                model_name=model_name,
+                system_prompt=thinking_system_prompt,
+                planner_message=followup_message,
+            )
+            token_usage = _merge_usage(token_usage, followup_usage)
+            followup_steps = _normalize_plan_steps(followup_payload)
+            for f_step in followup_steps:
+                f_tool = _normalize_tool_name(f_step.get("tool"))
+                if f_tool == "inspect_schema":
+                    continue
+                f_args = f_step.get("args") if isinstance(f_step.get("args"), dict) else {}
+                f_reason = str(f_step.get("reason") or "").strip()
+                f_action_text = f"Running `{f_tool}` to complete the analysis."
+                if f_reason:
+                    f_action_text = f"{f_action_text} {f_reason}"
+                append_trace(_make_trace_entry(
+                    kind="action",
+                    content=f_action_text,
+                    tool_name=f_tool,
+                    tool_input=json.dumps(f_args),
+                ))
+                if f_tool == "web_search":
+                    f_execution = _execute_web_search_tool(working_rows, f_args)
+                else:
+                    f_execution = _execute_sandbox_tool(
+                        tool=f_tool,
+                        args=f_args,
+                        prompt=prompt,
+                        rows=working_rows,
+                        datasets=datasets,
+                        active_dataset_id=active_dataset_id,
+                        selection_context=selection_context,
+                        is_multi_dataset_output=is_multi_dataset_output,
+                    )
+                append_trace(_make_trace_entry(
+                    kind="observation",
+                    content=f_execution.observation,
+                    details=_compact_observation_details(f_execution.raw_observation, max_lines=16, max_chars=900),
+                    status="error" if f_execution.error else "completed",
+                ))
+                executed_tools.append(f_tool)
+                if f_tool != "inspect_schema":
+                    executed_code_blocks.append(f"# {f_tool}\n{f_execution.code}")
+                working_rows = f_execution.rows
+                mutation_applied_any = mutation_applied_any or f_execution.mutation
+                latest_query_output = f_execution.query_output or latest_query_output
+                latest_visualization = f_execution.visualization or latest_visualization
+                latest_query_table_rows = f_execution.query_table_rows or latest_query_table_rows
+                latest_highlight_indices = f_execution.highlight_indices or latest_highlight_indices
+                latest_highlighted_columns = f_execution.highlighted_columns or latest_highlighted_columns
+                latest_observation = f_execution.observation
+                if f_execution.sources:
+                    for source in f_execution.sources:
+                        if source not in latest_sources:
+                            latest_sources.append(source)
+                if f_execution.error:
+                    f_original_code = f_execution.code or (f_args.get("code") if isinstance(f_args, dict) else "")
+                    if f_original_code:
+                        append_trace(_make_trace_entry(
+                            kind="thought",
+                            content=f"Encountered an execution error: {_truncate(f_execution.error, 140)}. Requesting syntax self-correction.",
+                        ))
+                        repaired_code, repair_thought, repair_usage = _repair_python_code(
+                            model_name=model_name,
+                            original_code=f_original_code,
+                            error_message=f_execution.error,
+                            dataset_columns=list(working_rows[0].keys()) if working_rows else None,
+                        )
+                        token_usage = _merge_usage(token_usage, repair_usage)
+                        if repaired_code:
+                            if repair_thought:
+                                append_trace(_make_trace_entry(kind="thought", content=repair_thought))
+                            append_trace(_make_trace_entry(
+                                kind="action",
+                                content="Retrying with self-corrected code.",
+                                tool_name="execute_python",
+                                tool_input=json.dumps({"code": repaired_code}),
+                            ))
+                            retry_execution = _execute_sandbox_tool(
+                                tool="execute_python",
+                                args={"code": repaired_code},
+                                prompt=prompt,
+                                rows=working_rows,
+                                datasets=datasets,
+                                active_dataset_id=active_dataset_id,
+                                selection_context=selection_context,
+                                is_multi_dataset_output=is_multi_dataset_output,
+                            )
+                            append_trace(_make_trace_entry(
+                                kind="observation",
+                                content=retry_execution.observation,
+                                details=_compact_observation_details(retry_execution.raw_observation, max_lines=16, max_chars=900),
+                                status="error" if retry_execution.error else "completed",
+                            ))
+                            if not retry_execution.error:
+                                f_execution = retry_execution
+                                executed_code_blocks.append(f"# execute_python (self-corrected)\n{f_execution.code}")
+                                working_rows = f_execution.rows
+                                mutation_applied_any = mutation_applied_any or f_execution.mutation
+                                latest_query_output = f_execution.query_output or latest_query_output
+                                latest_visualization = f_execution.visualization or latest_visualization
+                                latest_query_table_rows = f_execution.query_table_rows or latest_query_table_rows
+                                latest_highlight_indices = f_execution.highlight_indices or latest_highlight_indices
+                                latest_highlighted_columns = f_execution.highlighted_columns or latest_highlighted_columns
+                                latest_observation = f_execution.observation
+                            else:
+                                has_error = True
+                                break
+                        else:
+                            has_error = True
+                            break
+                    else:
+                        has_error = True
+                        break
+        except Exception as exc:
+            logger.warning("thinking follow-up step failed: %s", type(exc).__name__)
+
+    should_run_web_mutation_phase = (
+        "web_search" in executed_tools
+        and bool(web_observation)
+        and not mutation_applied_any
+        and not has_error
+        and (
+            _is_web_search_mutation_request(prompt)
+            or (
+                _has_mutation_intent(prompt)
+                and any(kw in prompt.lower() for kw in ("row", "rows", "column", "columns", "add", "insert", "append", "update", "modify"))
+            )
+        )
+    )
+    if should_run_web_mutation_phase:
+        append_trace(_make_trace_entry(
+            kind="thought",
+            content="Web search completed with real external data. Generating the dataset modification using the retrieved evidence.",
+        ))
+        cols = list(working_rows[0].keys()) if working_rows else []
+        sample_rows = working_rows[:2] if working_rows else []
+        phase2_system_prompt = f"""You are DataPilot. You have retrieved verified external facts from the web to fulfill the user's request.
+Now generate the code to modify the dataset (e.g. add rows or update columns) using the ACTUAL retrieved facts and real numbers.
+Return exactly one JSON object:
+{{"kind":"plan","thought":"concise description of the rows/columns being added with real numbers","steps":[{{"tool":"execute_python","args":{{"code":"<python code adding the real data>"}},"reason":"Add rows with retrieved real data"}}],"final_answer":"Summary of rows added with sources"}}
+
+Rules:
+1. You MUST use the actual real numbers, dates, and facts from the search results. Do NOT invent numbers.
+2. Inside execute_python, `df` is the active pandas DataFrame.
+3. Match the column names and data types of the existing dataset: {cols}.
+4. To add rows in execute_python, build new records and concatenate, e.g.:
+   new_rows = pd.DataFrame([
+       {{"col1": val1, "col2": val2}},
+       ...
+   ])
+   df = pd.concat([df, new_rows], ignore_index=True)
+   result_df = df
+5. Make sure the code is completely valid Python without syntax errors or escaping glitches.
+6. Do not include import statements."""
+
+        phase2_message = "\n".join([
+            f"User request: {prompt}",
+            f"Existing dataset columns: {cols}",
+            f"Existing sample rows: {json.dumps(sample_rows)}",
+            f"Current row count: {len(working_rows)}",
+            f"Retrieved web search results:\n{web_observation}",
+            "Generate the code to add/modify the rows using these actual retrieved numbers and match the existing dataset columns."
+        ])
+        try:
+            phase2_payload, phase2_usage = _invoke_planner_step(
+                model_name=model_name,
+                system_prompt=phase2_system_prompt,
+                planner_message=phase2_message,
+            )
+            token_usage = _merge_usage(token_usage, phase2_usage)
+            p2_thought = str(phase2_payload.get("thought") or "").strip()
+            if p2_thought:
+                append_trace(_make_trace_entry(kind="thought", content=_truncate(p2_thought, MAX_TRACE_CONTENT_CHARS)))
+            if phase2_payload.get("final_answer"):
+                planned_final_answer = str(phase2_payload.get("final_answer")).strip()
+            phase2_steps = _normalize_plan_steps(phase2_payload)
+            for p2_step in phase2_steps:
+                p2_tool = _normalize_tool_name(p2_step.get("tool"))
+                if p2_tool == "web_search":
+                    continue
+                p2_args = p2_step.get("args") if isinstance(p2_step.get("args"), dict) else {}
+                p2_reason = str(p2_step.get("reason") or "").strip()
+                p2_action_text = f"Running `{p2_tool}` with retrieved web data."
+                if p2_reason:
+                    p2_action_text = f"{p2_action_text} {p2_reason}"
+                append_trace(_make_trace_entry(
+                    kind="action",
+                    content=p2_action_text,
+                    tool_name=p2_tool,
+                    tool_input=json.dumps(p2_args),
+                ))
+                p2_execution = _execute_sandbox_tool(
+                    tool=p2_tool,
+                    args=p2_args,
+                    prompt=prompt,
+                    rows=working_rows,
+                    datasets=datasets,
+                    active_dataset_id=active_dataset_id,
+                    selection_context=selection_context,
+                    is_multi_dataset_output=is_multi_dataset_output,
+                )
+                append_trace(_make_trace_entry(
+                    kind="observation",
+                    content=p2_execution.observation,
+                    details=_compact_observation_details(p2_execution.raw_observation, max_lines=16, max_chars=900),
+                    status="error" if p2_execution.error else "completed",
+                ))
+                executed_tools.append(p2_tool)
+                if p2_execution.error:
+                    original_code = p2_execution.code or (p2_args.get("code") if isinstance(p2_args, dict) else "")
+                    if original_code:
+                        append_trace(_make_trace_entry(
+                            kind="thought",
+                            content=f"Encountered an execution error: {_truncate(p2_execution.error, 140)}. Requesting syntax self-correction.",
+                        ))
+                        repaired_code, repair_thought, repair_usage = _repair_python_code(
+                            model_name=model_name,
+                            original_code=original_code,
+                            error_message=p2_execution.error,
+                            dataset_columns=list(working_rows[0].keys()) if working_rows else None,
+                        )
+                        token_usage = _merge_usage(token_usage, repair_usage)
+                        if repaired_code:
+                            if repair_thought:
+                                append_trace(_make_trace_entry(kind="thought", content=repair_thought))
+                            append_trace(_make_trace_entry(
+                                kind="action",
+                                content="Retrying with self-corrected code.",
+                                tool_name="execute_python",
+                                tool_input=json.dumps({"code": repaired_code}),
+                            ))
+                            retry_execution = _execute_sandbox_tool(
+                                tool="execute_python",
+                                args={"code": repaired_code},
+                                prompt=prompt,
+                                rows=working_rows,
+                                datasets=datasets,
+                                active_dataset_id=active_dataset_id,
+                                selection_context=selection_context,
+                                is_multi_dataset_output=is_multi_dataset_output,
+                            )
+                            append_trace(_make_trace_entry(
+                                kind="observation",
+                                content=retry_execution.observation,
+                                details=_compact_observation_details(retry_execution.raw_observation, max_lines=16, max_chars=900),
+                                status="error" if retry_execution.error else "completed",
+                            ))
+                            if not retry_execution.error:
+                                p2_execution = retry_execution
+                            else:
+                                has_error = True
+                                break
+                        else:
+                            has_error = True
+                            break
+                    else:
+                        has_error = True
+                        break
+
+                executed_code_blocks.append(f"# {p2_tool}\n{p2_execution.code}")
+                working_rows = p2_execution.rows
+                mutation_applied_any = mutation_applied_any or p2_execution.mutation
+                latest_query_output = p2_execution.query_output or latest_query_output
+                latest_visualization = p2_execution.visualization or latest_visualization
+                latest_query_table_rows = p2_execution.query_table_rows or latest_query_table_rows
+                latest_highlight_indices = p2_execution.highlight_indices or latest_highlight_indices
+                latest_highlighted_columns = p2_execution.highlighted_columns or latest_highlighted_columns
+                latest_observation = p2_execution.observation
+        except Exception as exc:
+            logger.warning("thinking phase2 web mutation failed: %s", type(exc).__name__)
 
     should_fallback_to_web = (
         "web_search" not in executed_tools
@@ -1858,7 +2321,7 @@ def run_thinking_agent(
                     latest_sources.append(source)
 
     external_final_answer = ""
-    if latest_sources and web_observation:
+    if latest_sources and web_observation and not mutation_applied_any:
         append_trace(_make_trace_entry(kind="thought", content="Combining the dataset result with the external evidence and source attribution."))
         try:
             external_final_answer, usage = _write_external_fallback_answer(
@@ -1887,5 +2350,6 @@ def run_thinking_agent(
         mutation_applied=mutation_applied_any,
         fallback_text=latest_observation or "Executed the planned workflow.",
         planned_answer=planned_final_answer,
+        has_error=has_error,
     )
     return build_response(final_answer)

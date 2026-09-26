@@ -103,6 +103,190 @@ class ThinkingWebFallbackTests(unittest.TestCase):
         web_search.assert_called_once()
         self.assertTrue(result["sources"])
 
+    def test_schema_tool_handles_null_args(self) -> None:
+        from thinking import _execute_schema_tool, _safe_int
+        self.assertEqual(_safe_int(None, 2), 2)
+        self.assertEqual(_safe_int("invalid", 10), 10)
+        self.assertEqual(_safe_int("50", 10, max_val=20), 20)
+        exec_result = _execute_schema_tool(ROWS, {"sample_rows": None})
+        self.assertIsNone(exec_result.error)
+        self.assertIn("inspect_schema", exec_result.code)
+
+    def test_final_answer_fallback_avoids_hallucination_on_error(self) -> None:
+        from thinking import _final_answer_fallback
+        # When error occurs, do not return speculative planned_answer
+        reply = _final_answer_fallback(
+            query_output=None,
+            query_table_rows=None,
+            visualization=None,
+            created_output_rows=None,
+            mutation_applied=False,
+            fallback_text="Tool failed with: division by zero",
+            planned_answer="The average is 42.",
+            has_error=True,
+        )
+        self.assertIn("Tool failed", reply)
+        self.assertNotIn("42", reply)
+
+    def test_execute_sandbox_tool_catches_invalid_tool_args(self) -> None:
+        from thinking import _execute_sandbox_tool
+        exec_result = _execute_sandbox_tool(
+            tool="delete_row",
+            args={"index": "not_a_number"},
+            prompt="delete this row",
+            rows=ROWS,
+        )
+        self.assertIsNotNone(exec_result.error)
+        self.assertIn("delete_row", exec_result.code)
+
+    def test_heal_code_escaping_glitches(self) -> None:
+        from sandbox import heal_code_escaping_glitches, _validate_code
+        glitchy_code = (
+            "new_rows = [\n"
+            "    {'year': 2000, 'pop': 1056},n {'year': 2005, 'pop': 1147},n {'year': 2010, 'pop': 1234}\n"
+            "]\n"
+            "df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)\n"
+            "result_df = df"
+        )
+        healed = heal_code_escaping_glitches(glitchy_code)
+        self.assertNotIn(",n {", healed)
+        self.assertIn(",\n {", healed)
+        # Verify it passes AST validation cleanly
+        _validate_code(healed)
+
+        # Check that normal variable names 'n' are not broken
+        normal_code = "for i, n in enumerate([1, 2, 3]):\n    pass"
+        self.assertEqual(heal_code_escaping_glitches(normal_code), normal_code)
+
+    def test_syntax_self_correction_retry_on_syntax_error(self) -> None:
+        initial_plan = ({
+            "kind": "plan",
+            "thought": "I will calculate the sum.",
+            "steps": [{"tool": "execute_python", "args": {"code": "result_df = df\ninvalid syntax here ("}}],
+        }, {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2})
+
+        repair_response = ({
+            "thought": "Fixed unclosed parenthesis.",
+            "code": "result_df = df\nx = 10\nlog_output(x)",
+        }, {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2})
+
+        with patch("thinking._invoke_planner_step", side_effect=[initial_plan, repair_response]):
+            result = run_thinking_agent(
+                prompt="calculate something",
+                rows=ROWS,
+                model_name="test",
+                history=[],
+            )
+
+        trace_contents = [entry.get("content", "") for entry in result["thinking_trace"]]
+        self.assertTrue(any("Requesting syntax self-correction" in c for c in trace_contents))
+        self.assertTrue(any("Retrying with self-corrected code" in c for c in trace_contents))
+        self.assertIn("execute_python (self-corrected)", result["code"])
+        self.assertNotIn("Tool selection failed", result["assistant_reply"])
+
+    def test_two_phase_web_search_to_execution_adds_rows(self) -> None:
+        phase1_plan = ({
+            "kind": "plan",
+            "thought": "I will search the web for demographic data on India.",
+            "steps": [{"tool": "web_search", "args": {"query": "India fertility rate 2000 2005 2010"}}],
+        }, {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2})
+
+        phase2_plan = ({
+            "kind": "plan",
+            "thought": "Adding 3 rows for India using real data from the web search.",
+            "steps": [{
+                "tool": "execute_python",
+                "args": {
+                    "code": (
+                        "new_rows = pd.DataFrame([\n"
+                        "    {'year': 2000, 'country': 'India', 'fertility': 3.3},\n"
+                        "    {'year': 2005, 'country': 'India', 'fertility': 2.9},\n"
+                        "    {'year': 2010, 'country': 'India', 'fertility': 2.6}\n"
+                        "])\n"
+                        "df = pd.concat([df, new_rows], ignore_index=True)\n"
+                        "result_df = df"
+                    )
+                },
+                "reason": "Add retrieved rows.",
+            }],
+            "final_answer": "Added 3 rows for India with fertility rates from 2000 to 2010.",
+        }, {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2})
+
+        with patch("thinking._invoke_planner_step", side_effect=[phase1_plan, phase2_plan]), \
+             patch("thinking._execute_web_search_tool", return_value=WEB_RESULT) as web_mock:
+            result = run_thinking_agent(
+                prompt="using web search add 3 rows of india",
+                rows=ROWS,
+                model_name="test",
+                history=[],
+                active_dataset_id="active_1",
+            )
+
+        web_mock.assert_called_once()
+        self.assertEqual(len(result["result_rows"]), len(ROWS) + 3)
+        self.assertTrue(result["mutation"])
+        self.assertEqual(len(result["updated_datasets"]), 1)
+        self.assertIn("Added 3 rows for India", result["assistant_reply"])
+        self.assertTrue(result["sources"])
+        trace_contents = [entry.get("content", "") for entry in result["thinking_trace"]]
+        self.assertTrue(any("Web search completed with real external data" in c for c in trace_contents))
+
+    def test_sanitize_execute_python_heals_glitches(self) -> None:
+        from thinking import _sanitize_execute_python
+        glitchy_code = (
+            "new_rows = [\n"
+            "    {'year': 2000, 'pop': 1056},n {'year': 2005, 'pop': 1147}\n"
+            "]\n"
+            "df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)\n"
+            "result_df = df"
+        )
+        sanitized = _sanitize_execute_python(glitchy_code)
+        self.assertNotIn(",n {", sanitized)
+        self.assertIn(",\n {", sanitized)
+
+    def test_speculative_mutation_truncated_for_web_search_mutation(self) -> None:
+        # If the model tried to plan both web_search AND speculative execute_python in step 1,
+        # ensure it runs web_search first and discards the speculative step in favor of Phase 2.
+        speculative_step1 = ({
+            "kind": "plan",
+            "thought": "I will search web and guess the code.",
+            "steps": [
+                {"tool": "web_search", "args": {"query": "India population"}},
+                {"tool": "execute_python", "args": {"code": "df = df # speculative guess"}},
+            ],
+        }, {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2})
+
+        phase2_real = ({
+            "kind": "plan",
+            "thought": "Adding real rows from search.",
+            "steps": [{
+                "tool": "execute_python",
+                "args": {
+                    "code": (
+                        "new_rows = pd.DataFrame([{'year': 2020, 'country': 'India', 'fertility': 2.05}])\n"
+                        "df = pd.concat([df, new_rows], ignore_index=True)\n"
+                        "result_df = df"
+                    )
+                },
+            }],
+            "final_answer": "Added 1 real row for India.",
+        }, {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2})
+
+        with patch("thinking._invoke_planner_step", side_effect=[speculative_step1, phase2_real]), \
+             patch("thinking._execute_web_search_tool", return_value=WEB_RESULT) as web_mock:
+            result = run_thinking_agent(
+                prompt="search the web and add 1 row for india",
+                rows=ROWS,
+                model_name="test",
+                history=[],
+                active_dataset_id="active_1",
+            )
+
+        web_mock.assert_called_once()
+        self.assertEqual(len(result["result_rows"]), len(ROWS) + 1)
+        self.assertTrue(result["mutation"])
+        self.assertIn("Added 1 real row for India", result["assistant_reply"])
+
 
 if __name__ == "__main__":
     unittest.main()

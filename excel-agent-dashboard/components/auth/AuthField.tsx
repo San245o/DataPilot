@@ -39,13 +39,13 @@ export function AuthField({
 
   return (
     <div className="space-y-1.5">
-      <label className="block text-sm font-medium text-[var(--auth-text)]">
+      <label className="block text-xs font-medium text-slate-300">
         {label}
       </label>
 
       <div className="relative">
         <Icon
-          size={18}
+          size={16}
           className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400"
         />
 
@@ -57,10 +57,10 @@ export function AuthField({
           onChange={onChange}
           maxLength={maxLength}
           aria-invalid={!!error}
-          className={`w-full rounded-xl border bg-white py-3 pl-11 pr-11 text-sm text-[var(--auth-input-text)] outline-none transition-all placeholder:text-[var(--auth-input-placeholder)] ${
+          className={`w-full rounded-xl border bg-slate-900/80 py-2.5 pl-10 pr-10 text-xs text-slate-100 outline-none transition-all placeholder:text-slate-500 ${
             error
-              ? "border-red-400 focus:border-red-500 focus:ring-2 focus:ring-red-100"
-              : "border-[var(--auth-input-border)] focus:border-[var(--auth-accent)] focus:ring-2 focus:ring-blue-100"
+              ? "border-red-800/80 focus:border-red-500 focus:ring-1 focus:ring-red-500/20"
+              : "border-slate-800 focus:border-emerald-500/80 focus:ring-1 focus:ring-emerald-500/20"
           }`}
         />
 
@@ -68,16 +68,16 @@ export function AuthField({
           <button
             type="button"
             onClick={() => setShowPassword((prev) => !prev)}
-            className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400 transition-colors hover:text-slate-600"
+            className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-500 transition-colors hover:text-slate-300"
             aria-label={showPassword ? "Hide password" : "Show password"}
           >
-            {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+            {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
           </button>
         )}
       </div>
 
       {error && (
-        <p className="text-xs font-medium text-red-500">
+        <p className="text-[11px] font-medium text-red-400">
           {error}
         </p>
       )}

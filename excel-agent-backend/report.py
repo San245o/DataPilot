@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import threading
 import time
@@ -16,7 +17,7 @@ from thinking import run_thinking_agent
 
 TraceCallback = Callable[[dict[str, Any]], None]
 logger = logging.getLogger("excel-agent-backend.report")
-ANALYSIS_TIMEOUT_SECONDS = 20
+ANALYSIS_TIMEOUT_SECONDS = 60
 SYNTHESIS_TIMEOUT_SECONDS = 30
 SYNTHESIS_HEARTBEAT_SECONDS = 5
 
@@ -79,6 +80,29 @@ def _is_polished_text(value: Any) -> bool:
     text = str(value or "").strip()
     lowered = text.lower()
     return bool(text) and not any(marker in lowered for marker in FORBIDDEN_REPORT_MARKERS)
+
+
+def _safe_index(val: Any) -> int | None:
+    if val is None or isinstance(val, bool):
+        return None
+    try:
+        return int(float(str(val).strip()))
+    except (ValueError, TypeError):
+        return None
+
+
+def _sanitize_for_report_json(obj: Any) -> Any:
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {str(k): _sanitize_for_report_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_for_report_json(item) for item in obj]
+    if hasattr(obj, "item"):
+        return _sanitize_for_report_json(obj.item())
+    return obj
 
 
 def _compact_figure(figure: dict[str, Any]) -> dict[str, Any]:
@@ -230,8 +254,8 @@ def _deterministic_evidence(frame: pd.DataFrame) -> tuple[list[dict[str, str]], 
     findings: list[dict[str, str]] = []
     tables: list[dict[str, Any]] = []
     numeric = frame.select_dtypes(include="number").columns.tolist()
-    categorical = [column for column in frame.columns if column not in numeric and frame[column].nunique(dropna=True) <= 20]
     time_columns = [column for column in frame.columns if any(token in str(column).lower() for token in ("year", "date", "time"))]
+    categorical = [column for column in frame.columns if column not in numeric and column not in time_columns and frame[column].nunique(dropna=True) <= 20]
 
     if time_columns and categorical and numeric:
         time_column = time_columns[0]
@@ -243,11 +267,11 @@ def _deterministic_evidence(frame: pd.DataFrame) -> tuple[list[dict[str, str]], 
         for group, group_frame in ordered.groupby(group_column, dropna=False):
             for value_column in [column for column in numeric if column != time_column][:3]:
                 values = pd.to_numeric(group_frame[value_column], errors="coerce")
-                valid = group_frame.loc[values.notna()]
-                if len(valid) < 2:
+                valid_vals = values.dropna()
+                if len(valid_vals) < 2:
                     continue
-                start = float(valid[value_column].iloc[0])
-                end = float(valid[value_column].iloc[-1])
+                start = float(valid_vals.iloc[0])
+                end = float(valid_vals.iloc[-1])
                 change_rows.append({
                     _humanize(group_column): group,
                     "Measure": _humanize(value_column),
@@ -302,17 +326,35 @@ def _deterministic_evidence(frame: pd.DataFrame) -> tuple[list[dict[str, str]], 
 def _deterministic_chart(frame: pd.DataFrame) -> dict[str, Any] | None:
     numeric = frame.select_dtypes(include="number").columns.tolist()
     time_columns = [column for column in frame.columns if any(token in str(column).lower() for token in ("year", "date", "time"))]
-    groups = [column for column in frame.columns if column not in numeric and frame[column].nunique(dropna=True) <= 12]
+    groups = [column for column in frame.columns if column not in numeric and column not in time_columns and frame[column].nunique(dropna=True) <= 12]
     values = [column for column in numeric if column not in time_columns]
     if not time_columns or not groups or not values:
         return None
     value_column = next((column for column in values if any(token in str(column).lower() for token in ("life", "revenue", "sales", "value"))), values[0])
     time_column, group_column = time_columns[0], groups[0]
+    ordered = frame.copy()
+    num_time = pd.to_numeric(ordered[time_column], errors="coerce")
+    if num_time.notna().sum() >= max(2, int(len(ordered) * 0.5)):
+        ordered["_sort_key"] = num_time
+        ordered = ordered.dropna(subset=["_sort_key"]).sort_values("_sort_key")
+    else:
+        dt_time = pd.to_datetime(ordered[time_column], errors="coerce", format="mixed")
+        if dt_time.notna().sum() >= max(2, int(len(ordered) * 0.5)):
+            ordered["_sort_key"] = dt_time
+            ordered = ordered.dropna(subset=["_sort_key"]).sort_values("_sort_key")
+        else:
+            ordered["_sort_key"] = ordered[time_column].astype(str)
+            ordered = ordered.sort_values("_sort_key")
+
     traces = []
-    for group, subset in frame.sort_values(time_column).groupby(group_column, dropna=False):
+    for group, subset in ordered.groupby(group_column, dropna=False):
+        raw_x = subset[time_column].tolist()
+        raw_y = pd.to_numeric(subset[value_column], errors="coerce").tolist()
+        clean_x = [_sanitize_for_report_json(x) for x in raw_x]
+        clean_y = [_sanitize_for_report_json(y) for y in raw_y]
         traces.append({
             "type": "scatter", "mode": "lines+markers", "name": str(group),
-            "x": subset[time_column].tolist(), "y": subset[value_column].tolist(),
+            "x": clean_x, "y": clean_y,
         })
     return {
         "title": f"{_humanize(value_column)} over {_humanize(time_column).lower()}",
@@ -326,6 +368,115 @@ def _deterministic_chart(frame: pd.DataFrame) -> dict[str, Any] | None:
         },
         "interpretation": "",
     }
+
+
+def _deterministic_charts(frame: pd.DataFrame) -> list[dict[str, Any]]:
+    charts: list[dict[str, Any]] = []
+    numeric = frame.select_dtypes(include="number").columns.tolist()
+    time_columns = [column for column in frame.columns if any(token in str(column).lower() for token in ("year", "date", "time"))]
+    categorical = [column for column in frame.columns if column not in numeric and column not in time_columns and frame[column].nunique(dropna=True) <= 20]
+
+    trend = _deterministic_chart(frame)
+    if trend:
+        charts.append(trend)
+
+    if categorical:
+        cat_col = categorical[0]
+        val_col = next((c for c in numeric if c not in time_columns), None)
+        if val_col:
+            grouped = frame.groupby(cat_col, dropna=False)[val_col].mean().dropna().sort_values(ascending=False).head(8)
+            x_vals = [_humanize(str(k)) for k in grouped.index.tolist()]
+            y_vals = [_sanitize_for_report_json(round(float(v), 2)) for v in grouped.values.tolist()]
+            if len(x_vals) >= 2:
+                charts.append({
+                    "title": f"Average {_humanize(val_col)} by {_humanize(cat_col)}",
+                    "figure": {
+                        "data": [{
+                            "type": "bar",
+                            "x": x_vals,
+                            "y": y_vals,
+                            "marker": {"color": "#38bdf8"},
+                        }],
+                        "layout": {
+                            "title": {"text": f"Average {_humanize(val_col)} by {_humanize(cat_col)}"},
+                            "xaxis": {"title": {"text": _humanize(cat_col)}},
+                            "yaxis": {"title": {"text": f"Avg {_humanize(val_col)}"}},
+                        },
+                    },
+                    "interpretation": f"Compares average {_humanize(val_col).lower()} across observed {_humanize(cat_col).lower()} groups.",
+                })
+        else:
+            counts = frame[cat_col].value_counts().head(8)
+            x_vals = [_humanize(str(k)) for k in counts.index.tolist()]
+            y_vals = [_sanitize_for_report_json(int(v)) for v in counts.values.tolist()]
+            if len(x_vals) >= 2:
+                charts.append({
+                    "title": f"Distribution by {_humanize(cat_col)}",
+                    "figure": {
+                        "data": [{
+                            "type": "bar",
+                            "x": x_vals,
+                            "y": y_vals,
+                            "marker": {"color": "#34d399"},
+                        }],
+                        "layout": {
+                            "title": {"text": f"Record Counts by {_humanize(cat_col)}"},
+                            "xaxis": {"title": {"text": _humanize(cat_col)}},
+                            "yaxis": {"title": {"text": "Count"}},
+                        },
+                    },
+                    "interpretation": f"Shows the record frequency distribution across {_humanize(cat_col).lower()} categories.",
+                })
+
+    val_cols = [c for c in numeric if c not in time_columns]
+    if val_cols:
+        primary_val = val_cols[0]
+        vals = pd.to_numeric(frame[primary_val], errors="coerce").dropna().tolist()
+        if len(vals) >= 4:
+            clean_vals = [_sanitize_for_report_json(v) for v in vals]
+            charts.append({
+                "title": f"Distribution of {_humanize(primary_val)}",
+                "figure": {
+                    "data": [{
+                        "type": "histogram",
+                        "x": clean_vals,
+                        "marker": {"color": "#818cf8"},
+                    }],
+                    "layout": {
+                        "title": {"text": f"Distribution of {_humanize(primary_val)}"},
+                        "xaxis": {"title": {"text": _humanize(primary_val)}},
+                        "yaxis": {"title": {"text": "Frequency"}},
+                    },
+                },
+                "interpretation": f"Shows the spread and frequency of {_humanize(primary_val).lower()} across records.",
+            })
+
+    if len(val_cols) >= 2 and len(frame) >= 4:
+        col1, col2 = val_cols[0], val_cols[1]
+        x_vals = [_sanitize_for_report_json(v) for v in pd.to_numeric(frame[col1], errors="coerce").tolist()]
+        y_vals = [_sanitize_for_report_json(v) for v in pd.to_numeric(frame[col2], errors="coerce").tolist()]
+        valid_pairs = [(x, y) for x, y in zip(x_vals, y_vals) if x is not None and y is not None]
+        if len(valid_pairs) >= 4:
+            charts.append({
+                "title": f"{_humanize(col1)} vs. {_humanize(col2)}",
+                "figure": {
+                    "data": [{
+                        "type": "scatter",
+                        "mode": "markers",
+                        "x": [p[0] for p in valid_pairs],
+                        "y": [p[1] for p in valid_pairs],
+                        "marker": {"size": 8, "color": "#f472b6"},
+                    }],
+                    "layout": {
+                        "title": {"text": f"{_humanize(col1)} vs. {_humanize(col2)} Relationship"},
+                        "xaxis": {"title": {"text": _humanize(col1)}},
+                        "yaxis": {"title": {"text": _humanize(col2)}},
+                    },
+                },
+                "interpretation": f"Illustrates the numerical association between {_humanize(col1).lower()} and {_humanize(col2).lower()}.",
+            })
+
+    return charts
 
 
 def _profile(rows: list[dict[str, Any]]) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
@@ -436,13 +587,15 @@ def generate_auto_report(
 
     prompts = [(
         "analysis",
-        "Perform one bounded, evidence-focused analysis for a professional Auto Report. Use the active dataset only; never use "
+        "Perform one bounded, evidence-focused analysis for a professional Auto Report. [force_extract_table] Use the active dataset only; never use "
         "web_search and never mutate data. In one execute_python step where practical, calculate the most useful supported evidence: "
         "data quality, descriptive metrics, category/group comparisons, rankings, and—when ordered or date-like data exists—start/end "
         "values, absolute and percentage changes, strongest increase/decrease, and stability. Investigate useful numerical relationships "
-        "without implying causation and use cautious language for small samples. Log one polished evidence table when it adds value. "
-        "If one Plotly chart materially improves understanding, assign it to fig with readable axis labels and a meaningful title; otherwise "
-        "do not create a chart. Preserve actual calculated values for final synthesis."
+        "without implying causation and use cautious language for small samples. Log one polished result table when it adds value. "
+        "Generate 2 to 3 distinct, high-impact Plotly visualizations highlighting different aspects of the dataset "
+        "(e.g. category comparison bar chart, distribution histogram/box plot, time-series trend line, or correlation scatter plot). "
+        "Call log_chart(fig) for each figure, or assign a list to figs = [fig1, fig2, ...]. Give every figure clear titles, human-readable labels, and dark-theme friendly colors. "
+        "Preserve actual calculated values for final synthesis."
     )]
 
     analysis_evidence: list[dict[str, Any]] = []
@@ -472,16 +625,25 @@ def generate_auto_report(
                 }
                 tables.append(evidence_table)
                 evidence_tables.append(evidence_table)
-        figure = result.get("visualization")
-        if figure and figure.get("data"):
-            layout = figure.get("layout") or {}
-            raw_title = layout.get("title")
-            chart_title = raw_title.get("text") if isinstance(raw_title, dict) else raw_title
-            charts.append({
-                "title": str(chart_title or "Report Visualization"),
-                "figure": figure,
-                "interpretation": "",
-            })
+
+        # Collect all generated figures (supporting log_chart, figs list, or single fig)
+        result_figs = result.get("visualizations") or []
+        single_fig = result.get("visualization")
+        if single_fig and single_fig.get("data") and not result_figs:
+            result_figs = [single_fig]
+        for figure in result_figs:
+            if figure and figure.get("data"):
+                layout = figure.get("layout") or {}
+                raw_title = layout.get("title")
+                chart_title = raw_title.get("text") if isinstance(raw_title, dict) else raw_title
+                title_str = str(chart_title or f"Report Visualization {len(charts) + 1}")
+                if not any(c.get("title") == title_str for c in charts):
+                    charts.append({
+                        "title": title_str,
+                        "figure": figure,
+                        "interpretation": "",
+                    })
+
         analysis_evidence.append({
             "purpose": title,
             "calculated_output": str(result.get("query_output") or "")[:3000],
@@ -493,11 +655,11 @@ def generate_auto_report(
                 sources.append(source)
 
     if not charts:
-        emit({"kind": "thought", "content": "Checking whether a visualization would make the strongest pattern easier to understand."})
-        deterministic_chart = _deterministic_chart(pd.DataFrame(rows))
-        if deterministic_chart:
-            charts.append(deterministic_chart)
-            emit({"kind": "observation", "content": "A trend visualization was prepared from the active dataset.", "status": "completed"})
+        emit({"kind": "thought", "content": "Generating structured visualizations for key patterns and distributions."})
+        deterministic_charts = _deterministic_charts(pd.DataFrame(rows))
+        if deterministic_charts:
+            charts.extend(deterministic_charts)
+            emit({"kind": "observation", "content": f"{len(deterministic_charts)} visualizations were prepared from the active dataset.", "status": "completed"})
 
     synthesis_evidence = {
         "dataset": {"name": dataset_name, "rows": len(rows), "columns": len(pd.DataFrame(rows).columns)},
@@ -525,8 +687,8 @@ def generate_auto_report(
 
     selected_tables: list[dict[str, Any]] = []
     for presentation in synthesis.get("table_presentations") or []:
-        index = presentation.get("index")
-        if not isinstance(index, int) or not 0 <= index < len(tables):
+        index = _safe_index(presentation.get("index"))
+        if index is None or not (0 <= index < len(tables)):
             continue
         original = tables[index]
         labels = presentation.get("column_labels") if isinstance(presentation.get("column_labels"), dict) else {}
@@ -540,19 +702,36 @@ def generate_auto_report(
             "interpretation": str(presentation.get("interpretation") or original.get("interpretation") or ""),
         })
 
-    chart_presentations = {
-        item.get("index"): item for item in synthesis.get("chart_presentations") or []
-        if isinstance(item, dict) and isinstance(item.get("index"), int)
-    }
+    chart_presentations: dict[int, dict[str, Any]] = {}
+    for item in synthesis.get("chart_presentations") or []:
+        if isinstance(item, dict):
+            idx = _safe_index(item.get("index"))
+            if idx is not None:
+                chart_presentations[idx] = item
+
+    if len(charts) == 1 and 0 not in chart_presentations and 1 in chart_presentations:
+        chart_presentations[0] = chart_presentations[1]
+
     final_charts: list[dict[str, Any]] = []
     for index, chart in enumerate(charts):
         presentation = chart_presentations.get(index)
-        if not presentation or not _is_polished_text(presentation.get("interpretation")):
-            continue
+        if presentation and _is_polished_text(presentation.get("interpretation")):
+            chart_title = str(presentation.get("title") or chart["title"])
+            interpretation = str(presentation["interpretation"])
+        elif chart.get("interpretation") and _is_polished_text(chart["interpretation"]):
+            chart_title = str(chart["title"])
+            interpretation = str(chart["interpretation"])
+        elif len(charts) == 1:
+            chart_title = str(chart["title"])
+            interpretation = "This visualization summarizes the observed trend in the active dataset."
+        else:
+            chart_title = str(chart.get("title") or f"Visualization {index + 1}")
+            interpretation = "This visualization highlights significant patterns, distributions, or comparisons in the dataset."
+
         final_charts.append({
             **chart,
-            "title": str(presentation.get("title") or chart["title"]),
-            "interpretation": str(presentation["interpretation"]),
+            "title": chart_title,
+            "interpretation": interpretation,
         })
 
     final_sections: list[dict[str, Any]] = []
@@ -585,4 +764,4 @@ def generate_auto_report(
         "report completed dataset=%s sections=%s tables=%s charts=%s",
         dataset_id, len(final_sections), len(selected_tables), len(final_charts),
     )
-    return final_report
+    return _sanitize_for_report_json(final_report)

@@ -1,4 +1,3 @@
-import { Layers, Upload, type LucideIcon } from "lucide-react"
 import type { Data, Frame, Layout } from "plotly.js"
 
 export type CellValue = string | number | boolean | null
@@ -174,12 +173,6 @@ export type SlashCommandOption = {
 
 export type FullscreenPanel = "data" | "canvas" | null
 
-export type WorkflowStep = {
-  label: string
-  icon: LucideIcon
-  isContextButton?: boolean
-}
-
 export const seedRows: SheetRow[] = [
   { year: 2000, country: "Kenya", fertility: 4.9, life_expectancy: 52.1, pop_size: 3.7 },
   { year: 2005, country: "Kenya", fertility: 4.6, life_expectancy: 56.7, pop_size: 4.1 },
@@ -199,10 +192,6 @@ export const INITIAL_CHAT_MESSAGES: ChatMessage[] = [
   },
 ]
 
-export const transformationSteps: WorkflowStep[] = [
-  { label: "Upload", icon: Upload },
-  { label: "Context", icon: Layers, isContextButton: true },
-]
 
 export const MODEL_OPTIONS = [
   { value: "gemini-3-flash-preview", label: "Gemini 3 Flash" },

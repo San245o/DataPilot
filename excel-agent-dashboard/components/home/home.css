@@ -32,11 +32,11 @@
   --surface: oklch(0.175 0.018 168);
   --surface-raised: oklch(0.21 0.022 168);
   --surface-hover: oklch(0.235 0.028 168);
-  --emerald-glow: oklch(0.72 0.17 160 / 25%);
-  --emerald-soft: oklch(0.72 0.17 160 / 12%);
+  --emerald-glow: transparent;
+  --emerald-soft: oklch(0.72 0.17 160 / 10%);
 
-  --shadow-card: 0 1px 2px oklch(0 0 0 / 40%), 0 4px 16px -4px oklch(0 0 0 / 35%);
-  --shadow-glow: 0 0 0 1px oklch(0.72 0.17 160 / 35%), 0 8px 30px -6px oklch(0.72 0.17 160 / 22%);
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --shadow-glow: 0 1px 3px rgba(0, 0, 0, 0.3);
 
   background-color: var(--background);
   color: var(--foreground);
@@ -84,12 +84,9 @@
 }
 
 .datapilot-home .card-lift:hover {
-  transform: translateY(-3px);
-  border-color: oklch(0.72 0.17 160 / 45%);
-  box-shadow:
-    0 0 0 1px oklch(0.72 0.17 160 / 20%),
-    0 12px 32px -8px oklch(0.72 0.17 160 / 18%),
-    0 4px 12px oklch(0 0 0 / 30%);
+  transform: translateY(-2px);
+  border-color: oklch(0.72 0.17 160 / 35%);
+  box-shadow: 0 4px 16px -4px rgba(0, 0, 0, 0.4);
 }
 
 .datapilot-home .icon-pop {

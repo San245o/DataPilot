@@ -16,7 +16,15 @@ ENTRA_TENANT_ID = os.getenv("ENTRA_TENANT_ID") or os.getenv("NEXT_PUBLIC_ENTRA_T
 ENTRA_TENANT_SUBDOMAIN = os.getenv("ENTRA_TENANT_SUBDOMAIN") or os.getenv("NEXT_PUBLIC_ENTRA_TENANT_SUBDOMAIN", "datapilot.ciamlogin.com")
 ENTRA_API_CLIENT_ID = os.getenv("ENTRA_API_CLIENT_ID") or os.getenv("NEXT_PUBLIC_ENTRA_API_CLIENT_ID")
 ENTRA_REQUIRED_SCOPE = os.getenv("ENTRA_REQUIRED_SCOPE", "access_as_user")
-REQUIRE_AUTH = os.getenv("REQUIRE_AUTH", "true").lower() in ("true", "1", "yes")
+
+def _is_auth_enforced() -> bool:
+    explicit = os.getenv("REQUIRE_AUTH")
+    if explicit is not None:
+        return explicit.strip().lower() in ("true", "1", "yes")
+    tenant_id = os.getenv("ENTRA_TENANT_ID") or os.getenv("NEXT_PUBLIC_ENTRA_TENANT_ID")
+    return bool(tenant_id and not str(tenant_id).startswith("placeholder"))
+
+REQUIRE_AUTH = _is_auth_enforced()
 
 _jwks_clients: dict[str, PyJWKClient] = {}
 
@@ -122,7 +130,7 @@ def verify_entra_api_token(token: str) -> dict[str, Any]:
 
 def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> dict[str, Any]:
     if not credentials or not credentials.credentials:
-        if REQUIRE_AUTH:
+        if _is_auth_enforced():
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Authentication required. Please provide a valid Bearer token for DataPilot API.",

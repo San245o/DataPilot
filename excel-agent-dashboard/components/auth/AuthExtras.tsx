@@ -13,12 +13,12 @@ export function AuthHeading({
   subtitle: string;
 }) {
   return (
-    <div className="mb-7">
-      <h1 className="text-2xl font-semibold tracking-tight text-slate-900 sm:text-3xl">
+    <div className="mb-6">
+      <h1 className="text-xl font-bold tracking-tight text-slate-100 sm:text-2xl">
         {title}
       </h1>
 
-      <p className="mt-2 text-sm text-slate-500">
+      <p className="mt-1.5 text-xs text-slate-400">
         {subtitle}
       </p>
     </div>
@@ -37,7 +37,7 @@ export function PrimaryButton({
     <button
       {...props}
       disabled={props.disabled || loading}
-      className="h-12 w-full rounded-xl bg-[var(--auth-accent)] text-sm font-semibold text-white shadow-lg shadow-blue-500/20 transition-all duration-200 hover:opacity-95 hover:shadow-blue-500/30 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60"
+      className="flex h-11 w-full items-center justify-center rounded-xl bg-emerald-500 text-xs font-semibold text-slate-950 transition-colors hover:bg-emerald-400 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50"
     >
       {loading ? "Please wait…" : children}
     </button>
@@ -46,14 +46,14 @@ export function PrimaryButton({
 
 export function OrDivider() {
   return (
-    <div className="my-6 flex items-center gap-4">
-      <span className="h-px flex-1 bg-slate-200" />
+    <div className="my-5 flex items-center gap-3">
+      <span className="h-px flex-1 bg-slate-800" />
 
-      <span className="text-xs font-medium tracking-widest text-slate-400">
-        OR
+      <span className="text-[10px] font-semibold tracking-wider text-slate-500 uppercase">
+        or continue with
       </span>
 
-      <span className="h-px flex-1 bg-slate-200" />
+      <span className="h-px flex-1 bg-slate-800" />
     </div>
   );
 }
@@ -67,11 +67,11 @@ export function GoogleButton({
     <button
       type="button"
       onClick={onClick}
-      className="flex h-12 w-full items-center justify-center gap-3 rounded-xl border border-slate-200 bg-white text-sm font-medium text-slate-800 transition-all duration-200 hover:border-slate-300 hover:bg-slate-50 active:scale-[0.99]"
+      className="flex h-11 w-full items-center justify-center gap-2.5 rounded-xl border border-slate-800 bg-slate-900/60 text-xs font-medium text-slate-200 transition-colors hover:border-slate-700 hover:bg-slate-900 hover:text-white active:scale-[0.99]"
     >
       <svg
         viewBox="0 0 24 24"
-        className="h-[18px] w-[18px]"
+        className="h-4 w-4"
         aria-hidden="true"
       >
         <path
@@ -92,7 +92,7 @@ export function GoogleButton({
         />
       </svg>
 
-      Continue with Google
+      <span>Google</span>
     </button>
   );
 }

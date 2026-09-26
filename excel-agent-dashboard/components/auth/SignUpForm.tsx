@@ -165,13 +165,13 @@ export function SignUpForm() {
       />
 
       {errors.general && (
-        <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-600">
+        <div className="mb-4 rounded-xl border border-red-900/60 bg-red-950/30 p-3 text-xs text-red-300">
           {errors.general}
         </div>
       )}
 
       {successMessage && (
-        <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-700">
+        <div className="mb-4 rounded-xl border border-emerald-900/60 bg-emerald-950/30 p-3 text-xs text-emerald-300">
           {successMessage}
         </div>
       )}
@@ -226,12 +226,12 @@ export function SignUpForm() {
         />
 
         <div className="pt-1">
-          <label className="flex items-start gap-3 text-sm text-slate-600">
+          <label className="flex items-start gap-2.5 text-xs text-slate-400">
             <input
               type="checkbox"
               checked={terms}
               onChange={handleTermsChange}
-              className="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300 accent-[var(--auth-accent)]"
+              className="mt-0.5 h-3.5 w-3.5 shrink-0 rounded border-slate-700 bg-slate-900 accent-emerald-500"
             />
 
             <span>
@@ -240,7 +240,7 @@ export function SignUpForm() {
           </label>
 
           {errors.terms && (
-            <p className="mt-1.5 text-xs font-medium text-red-500">
+            <p className="mt-1 text-[11px] font-medium text-red-400">
               {errors.terms}
             </p>
           )}
@@ -255,11 +255,11 @@ export function SignUpForm() {
 
       <GoogleButton onClick={handleGoogle} />
 
-      <p className="mt-7 text-center text-sm text-slate-500">
+      <p className="mt-6 text-center text-xs text-slate-400">
         Already have an account?{" "}
         <Link
           href="/login"
-          className="font-semibold text-[var(--auth-accent)] hover:underline"
+          className="font-semibold text-emerald-400 hover:text-emerald-300 hover:underline"
         >
           Sign in
         </Link>

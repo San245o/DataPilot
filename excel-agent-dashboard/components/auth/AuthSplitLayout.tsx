@@ -2,8 +2,8 @@
 
 import type { ReactNode } from "react";
 import Link from "next/link";
+import { ArrowLeft, Compass, ShieldCheck } from "lucide-react";
 import { DataPilotAnimation } from "./DataPilotAnimation";
-import { DataPilotLogo } from "./DataPilotLogo";
 
 interface AuthSplitLayoutProps {
   children: ReactNode;
@@ -11,171 +11,69 @@ interface AuthSplitLayoutProps {
 
 export function AuthSplitLayout({ children }: AuthSplitLayoutProps) {
   return (
-    <div className="flex min-h-screen flex-col bg-white lg:flex-row">
-      {/* =====================================================
-          LEFT — DATAPILOT BRAND PANEL
-          ===================================================== */}
-
-      <aside
-        className="
-          relative
-          flex
-          min-h-[430px]
-          w-full
-          overflow-hidden
-          bg-[var(--auth-panel)]
-          px-6
-          py-8
-          text-[var(--auth-panel-fg)]
-          sm:px-10
-          lg:min-h-screen
-          lg:w-[46%]
-          lg:px-14
-          lg:py-12
-        "
-      >
-        {/* Background glow */}
-        <div className="auth-panel-glow" />
-
-        {/* Subtle grid */}
+    <div className="flex min-h-screen flex-col bg-slate-950 text-slate-100 lg:flex-row">
+      {/* Left Brand Panel - Dark Slate with Emerald & Cyan accents */}
+      <aside className="relative flex min-h-[420px] w-full flex-col justify-between overflow-hidden border-b border-slate-800/80 bg-slate-900/40 px-6 py-8 sm:px-10 lg:min-h-screen lg:w-[46%] lg:border-b-0 lg:border-r lg:px-12 lg:py-12">
+        {/* Subtle grid pattern */}
         <div
-          className="
-            pointer-events-none
-            absolute
-            inset-0
-            opacity-[0.07]
-            [background-image:linear-gradient(rgba(255,255,255,0.35)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.35)_1px,transparent_1px)]
-            [background-size:42px_42px]
-          "
+          className="pointer-events-none absolute inset-0 opacity-[0.03] [background-image:linear-gradient(rgba(255,255,255,0.4)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.4)_1px,transparent_1px)] [background-size:32px_32px]"
+          aria-hidden="true"
         />
 
-        <div className="relative z-10 flex w-full flex-col">
+        <div className="relative z-10">
           {/* Logo */}
-          <div>
-            <Link href="/">
-              <DataPilotLogo />
-            </Link>
-          </div>
+          <Link href="/" className="inline-flex items-center gap-2.5">
+            <span className="flex size-9 items-center justify-center rounded-xl border border-slate-800 bg-slate-900 text-emerald-400 shadow-sm">
+              <Compass className="size-5" />
+            </span>
+            <span className="text-lg font-bold tracking-tight text-slate-100">
+              DataPilot
+            </span>
+          </Link>
 
-          {/* Main branding content */}
-          <div className="mt-12 max-w-xl">
-            <div
-              className="
-                mb-6
-                flex
-                w-fit
-                items-center
-                rounded-full
-                border
-                border-white/10
-                bg-white/[0.05]
-                px-3
-                py-1.5
-                text-xs
-                font-medium
-                tracking-wide
-                text-blue-200
-                backdrop-blur-sm
-              "
-            >
-              AI-powered spreadsheet intelligence
+          {/* Value Prop */}
+          <div className="mt-10 max-w-lg sm:mt-14">
+            <div className="inline-flex items-center gap-2 rounded-full border border-slate-800 bg-slate-900/90 px-3 py-1 text-xs font-medium text-slate-300">
+              <span className="size-1.5 rounded-full bg-emerald-400" />
+              <span>Next-Gen Spreadsheet Intelligence</span>
             </div>
 
-            <h2
-              className="
-                mt-4
-                text-3xl
-                font-semibold
-                leading-tight
-                tracking-tight
-                sm:text-4xl
-                lg:text-[2.6rem]
-              "
-            >
+            <h2 className="mt-5 text-2xl font-bold tracking-tight text-slate-100 sm:text-3xl lg:text-4xl">
               Your data has answers.
               <br />
-              <span className="text-[var(--auth-accent)]">
-                DataPilot
-              </span>{" "}
-              helps you find them.
+              <span className="text-emerald-400">DataPilot</span> helps you find them.
             </h2>
 
-            <p
-              className="
-                mt-5
-                max-w-lg
-                text-sm
-                leading-7
-                text-[var(--auth-panel-muted)]
-                sm:text-base
-              "
-            >
-              Turn complex spreadsheets into actionable insights
-              with AI-powered analytics, intelligent visualization,
-              and natural-language data exploration.
+            <p className="mt-3 text-xs leading-relaxed text-slate-400 sm:text-sm">
+              Clean messy sheets, execute Python models in an isolated sandbox, and generate
+              multi-chart reports with conversational AI.
             </p>
           </div>
 
-          {/* Animated DataPilot visualization */}
-          <div className="mt-8 w-full lg:mt-10">
-            <DataPilotAnimation className="h-44 w-full sm:h-52 lg:h-72" />
+          {/* Animation Container */}
+          <div className="mt-8 w-full max-w-md">
+            <DataPilotAnimation className="h-44 w-full sm:h-52 lg:h-64" />
           </div>
+        </div>
 
-          {/* Bottom text */}
-          <div className="mt-6 hidden items-center gap-2 text-xs text-white/40 lg:flex">
-            <span className="h-1.5 w-1.5 rounded-full bg-cyan-400" />
-            <span>Intelligent. Insightful. Data-driven.</span>
-          </div>
+        {/* Footer Note */}
+        <div className="relative z-10 mt-6 hidden items-center gap-2 text-xs text-slate-500 lg:flex">
+          <ShieldCheck className="size-4 text-emerald-400" />
+          <span>Sandboxed Python runtime · End-to-end data integrity</span>
         </div>
       </aside>
 
-      {/* =====================================================
-          RIGHT — AUTHENTICATION FORM
-          ===================================================== */}
-
-      <main
-        className="
-          relative
-          flex
-          min-h-[calc(100vh-430px)]
-          flex-1
-          items-center
-          justify-center
-          bg-white
-          px-5
-          py-12
-          text-slate-900
-          sm:px-8
-          lg:min-h-screen
-          lg:px-12
-          lg:py-16
-        "
-      >
+      {/* Right Form Panel - Sleek Dark Slate Matching Dashboard */}
+      <main className="relative flex min-h-[calc(100vh-420px)] flex-1 items-center justify-center bg-slate-950 px-6 py-12 text-slate-100 sm:px-10 lg:min-h-screen lg:px-14 lg:py-16">
         <Link
           href="/"
-          className="
-            absolute
-            left-5
-            top-5
-            inline-flex
-            items-center
-            gap-2
-            text-sm
-            font-medium
-            text-slate-500
-            transition-colors
-            hover:text-slate-900
-            sm:left-8
-            sm:top-7
-            lg:left-12
-            lg:top-9
-          "
+          className="absolute left-6 top-6 inline-flex items-center gap-2 rounded-lg border border-slate-800/80 bg-slate-900/60 px-3 py-1.5 text-xs font-medium text-slate-400 transition-colors hover:border-slate-700 hover:text-white sm:left-10 sm:top-8"
         >
-          <span aria-hidden="true">←</span>
-          Back to home
+          <ArrowLeft className="size-3.5" />
+          <span>Back to home</span>
         </Link>
 
-        <div className="w-full max-w-md animate-[auth-fade-in_0.5s_ease-out]">
+        <div className="w-full max-w-md pt-8 sm:pt-0">
           {children}
         </div>
       </main>

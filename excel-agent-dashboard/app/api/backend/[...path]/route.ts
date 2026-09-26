@@ -14,9 +14,11 @@ async function handleProxy(request: NextRequest, { params }: { params: Promise<{
   // Clean host header
   headers.delete("host");
 
-  // Attach Bearer Access Token server-side from HTTP-only session cookie
+  // Attach Bearer Access Token server-side from HTTP-only session cookie or dev fallback
   if (session?.accessToken) {
     headers.set("Authorization", `Bearer ${session.accessToken}`);
+  } else if (!headers.has("Authorization")) {
+    headers.set("Authorization", "Bearer dev_token_dev-local-user");
   }
 
   try {

@@ -1,23 +1,24 @@
 import type { Metadata } from "next";
-import { IBM_Plex_Mono, Manrope } from "next/font/google";
+import { IBM_Plex_Mono, Inter } from "next/font/google";
 import "./globals.css";
 
-const manrope = Manrope({
-  variable: "--font-manrope",
-  weight: ["500", "600", "700", "800"],
+const inter = Inter({
+  variable: "--font-inter",
   subsets: ["latin"],
+  display: "swap",
 });
 
 const plexMono = IBM_Plex_Mono({
   variable: "--font-plex-mono",
-  weight: ["400", "500"],
+  weight: ["400", "500", "600"],
   subsets: ["latin"],
+  display: "swap",
 });
 
 export const metadata: Metadata = {
-  title: "Data Pilot | Excel Agent Dashboard",
+  title: "DataPilot | Excel Agent Dashboard",
   description:
-    "Modern Next.js Turbopack dashboard with shadcn UI, Plotly, and lightweight analytics visualizations.",
+    "Intelligent spreadsheet analysis, data cleaning, and automated multi-chart reports.",
 };
 
 export default function RootLayout({
@@ -28,7 +29,7 @@ export default function RootLayout({
   return (
     <html lang="en" className="dark" suppressHydrationWarning>
       <body
-        className={`${manrope.variable} ${plexMono.variable} antialiased`}
+        className={`${inter.variable} ${plexMono.variable} font-sans antialiased`}
       >
         {children}
       </body>

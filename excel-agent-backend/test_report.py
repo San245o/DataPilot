@@ -6,7 +6,17 @@ import time
 import unittest
 from unittest.mock import patch
 
-from report import FORBIDDEN_REPORT_MARKERS, _is_polished_text, _run_analysis_bounded, _synthesize_report, generate_auto_report
+from report import (
+    FORBIDDEN_REPORT_MARKERS,
+    _deterministic_chart,
+    _deterministic_charts,
+    _is_polished_text,
+    _run_analysis_bounded,
+    _safe_index,
+    _sanitize_for_report_json,
+    _synthesize_report,
+    generate_auto_report,
+)
 from main import _cache_dataset, execute_auto_report_stream
 from schemas import ReportRequest
 from thinking import ToolExecution, run_thinking_agent
@@ -156,6 +166,86 @@ class AutoReportSynthesisTests(unittest.TestCase):
         action_index = next(index for index, event in enumerate(events) if event["kind"] == "action")
         observation_index = next(index for index, event in enumerate(events) if event["content"] == "Schema checked.")
         self.assertLess(action_index, observation_index)
+
+    def test_safe_index_parsing(self) -> None:
+        self.assertEqual(_safe_index(0), 0)
+        self.assertEqual(_safe_index("0"), 0)
+        self.assertEqual(_safe_index(" 2 "), 2)
+        self.assertEqual(_safe_index(1.0), 1)
+        self.assertIsNone(_safe_index(None))
+        self.assertIsNone(_safe_index(True))
+        self.assertIsNone(_safe_index(False))
+        self.assertIsNone(_safe_index("invalid"))
+
+    def test_sanitize_for_report_json_eliminates_nan_and_inf(self) -> None:
+        payload = {
+            "title": "Test",
+            "values": [1.0, float("nan"), float("inf"), -float("inf")],
+            "nested": {"val": float("nan")},
+        }
+        sanitized = _sanitize_for_report_json(payload)
+        self.assertEqual(sanitized["values"], [1.0, None, None, None])
+        self.assertIsNone(sanitized["nested"]["val"])
+        # Standard RFC-compliant JSON serialization without allow_nan=True must succeed
+        encoded = json.dumps(sanitized, allow_nan=False)
+        self.assertNotIn("NaN", encoded)
+        self.assertNotIn("Infinity", encoded)
+
+    def test_deterministic_chart_handles_mixed_types_and_nans(self) -> None:
+        import pandas as pd
+        rows = [
+            {"year": 2000, "region": "North", "sales": 100.0},
+            {"year": "2001", "region": "North", "sales": float("nan")},
+            {"year": 2002, "region": "North", "sales": 150.0},
+            {"year": "2000", "region": "South", "sales": 80.0},
+            {"year": 2001, "region": "South", "sales": 90.0},
+            {"year": 2002, "region": "South", "sales": 110.0},
+        ]
+        chart = _deterministic_chart(pd.DataFrame(rows))
+        self.assertIsNotNone(chart)
+        figure = chart["figure"]
+        self.assertEqual(len(figure["data"]), 2)
+        # Verify JSON serialization without allow_nan=True succeeds
+        encoded = json.dumps(figure, allow_nan=False)
+        self.assertNotIn("NaN", encoded)
+
+    def test_string_indices_in_presentations_preserve_tables_and_charts(self) -> None:
+        base_result = {
+            "assistant_reply": "Calculated results.",
+            "query_output": "val: 42",
+            "query_tables": [{"title": "Country stats", "rows": [{"Country": "Kenya", "Value": 42}]}],
+            "visualization": {"data": [{"type": "scatter", "x": [1, 2], "y": [3, 4]}], "layout": {}},
+            "sources": [],
+        }
+        # String indices "0"
+        synthesis = {
+            "executive_summary": "Summary of observations across countries.",
+            "sections": [],
+            "table_presentations": [{"index": "1", "title": "Polished stats"}],
+            "chart_presentations": [{"index": "0", "title": "Polished chart", "interpretation": "Observed trend."}],
+            "conclusion": "Conclusion on the data.",
+            "recommendations": [],
+        }
+        with patch("report._run_analysis", return_value=base_result), patch("report._synthesize_report", return_value=synthesis):
+            generated = generate_auto_report(dataset_id="test", dataset_name="Data", rows=GAPMINDER_ROWS, model_name="test")
+
+        self.assertEqual(len(generated["tables"]), 1)
+        self.assertEqual(generated["tables"][0]["title"], "Polished stats")
+        self.assertEqual(len(generated["charts"]), 1)
+        self.assertEqual(generated["charts"][0]["title"], "Polished chart")
+
+    def test_deterministic_charts_generates_multiple_distinct_visualizations(self) -> None:
+        import pandas as pd
+        charts = _deterministic_charts(pd.DataFrame(GAPMINDER_ROWS))
+        self.assertGreaterEqual(len(charts), 3)
+        chart_types = [chart["figure"]["data"][0]["type"] for chart in charts]
+        # Should contain scatter (trend/points), bar, and histogram
+        self.assertIn("bar", chart_types)
+        self.assertIn("scatter", chart_types)
+        for chart in charts:
+            self.assertTrue(chart["title"])
+            encoded = json.dumps(chart["figure"], allow_nan=False)
+            self.assertNotIn("NaN", encoded)
 
 
 if __name__ == "__main__":

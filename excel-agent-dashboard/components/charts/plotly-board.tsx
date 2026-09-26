@@ -33,13 +33,13 @@ export function PlotlyBoard({ data, layout, frames, isDark = true }: PlotlyBoard
     plot_bgcolor: bgColor,
     colorway,
     margin: { l: 42, r: 18, t: 52, b: 44 },
-    font: { size: 12, color: fontColor, family: "Manrope, system-ui, sans-serif" },
+    font: { size: 12, color: fontColor, family: "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" },
     title: layout?.title
       ? {
           ...(typeof layout.title === "object" ? layout.title : { text: String(layout.title) }),
           x: 0.03,
           xanchor: "left",
-          font: { color: titleColor, size: 22, family: "Manrope, system-ui, sans-serif" },
+          font: { color: titleColor, size: 22, family: "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" },
         }
       : undefined,
     xaxis: {
@@ -51,7 +51,7 @@ export function PlotlyBoard({ data, layout, frames, isDark = true }: PlotlyBoard
       title: layout?.xaxis?.title
         ? {
             ...(typeof layout.xaxis.title === "object" ? layout.xaxis.title : { text: String(layout.xaxis.title) }),
-            font: { color: fontColor, size: 13, family: "Manrope, system-ui, sans-serif" },
+            font: { color: fontColor, size: 13, family: "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" },
           }
         : undefined,
     },
@@ -64,7 +64,7 @@ export function PlotlyBoard({ data, layout, frames, isDark = true }: PlotlyBoard
       title: layout?.yaxis?.title
         ? {
             ...(typeof layout.yaxis.title === "object" ? layout.yaxis.title : { text: String(layout.yaxis.title) }),
-            font: { color: fontColor, size: 13, family: "Manrope, system-ui, sans-serif" },
+            font: { color: fontColor, size: 13, family: "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" },
           }
         : undefined,
     },
@@ -90,7 +90,7 @@ export function PlotlyBoard({ data, layout, frames, isDark = true }: PlotlyBoard
       ...(layout?.legend ?? {}),
       bgcolor: bgColor,
       borderwidth: 0,
-      font: { color: fontColor, size: 12, family: "Manrope, system-ui, sans-serif" },
+      font: { color: fontColor, size: 12, family: "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" },
     },
     hoverlabel: {
       ...(layout?.hoverlabel ?? {}),

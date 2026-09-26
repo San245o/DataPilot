@@ -201,9 +201,24 @@ class SandboxResult:
     mutation: bool = False
     highlight_indices: list[int] = field(default_factory=list)
     highlighted_columns: list[str] = field(default_factory=list)
+    visualizations: list[dict[str, Any]] = field(default_factory=list)
+
+
+def heal_code_escaping_glitches(code: str) -> str:
+    """Automatically repair model escaping glitches like ',n {' or '}n {' into valid Python syntax."""
+    if not code:
+        return code
+    # Repair `,n {`, `,n [`, `,n '`, `,n "` -> `,\n {`, etc.
+    healed = re.sub(r",\s*n\s*([{\[\'\"])", r",\n \1", code)
+    # Repair `}n {`, `]n [`, `},n {`, `],n [` -> `},\n {`, etc.
+    healed = re.sub(r"([}\]])\s*,?\s*n\s*([{\[])", r"\1,\n \2", healed)
+    # Repair `)n (` or `),n (` -> `),\n (`
+    healed = re.sub(r"(\))\s*,?\s*n\s*(\()", r"\1,\n \2", healed)
+    return healed
 
 
 def _validate_code(code: str) -> None:
+    code = heal_code_escaping_glitches(code)
     try:
         tree = ast.parse(code, mode="exec")
     except SyntaxError as e:
@@ -231,6 +246,7 @@ def _execute_in_sandbox(
     active_dataset_id: str | None = None,
     selection_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    code = heal_code_escaping_glitches(code)
     _validate_code(code)
 
     df = pd.DataFrame(rows)
@@ -625,6 +641,7 @@ def _execute_in_sandbox(
         "get_selected_columns": get_selected_columns,
         "selected_df": selected_df,
         "log_output": log_output,
+        "log_chart": lambda figure: collected_figures.append(figure) if hasattr(figure, "to_plotly_json") else None,
         "print": safe_print,
         "print_query": print_query,
         "print_table": print_table,
@@ -643,6 +660,7 @@ def _execute_in_sandbox(
         "to_numeric_clean": to_numeric_clean,
     })
 
+    collected_figures: list[Any] = []
     exec(code, env, env)  # noqa: S102
 
     # Determine if mutation happened
@@ -663,14 +681,44 @@ def _execute_in_sandbox(
             except Exception:
                 mutation_flag[0] = True
 
+    visualizations: list[dict[str, Any]] = []
+
+    # 1. Collect figures from log_chart calls
+    for f in collected_figures:
+        try:
+            raw_viz = f.to_plotly_json()
+            sanitized = _sanitize_for_json(raw_viz)
+            if sanitized and sanitized not in visualizations:
+                visualizations.append(sanitized)
+        except Exception:
+            pass
+
+    # 2. Collect figures from env["figs"] or env["figures"] list
+    env_figs = env.get("figs") or env.get("figures")
+    if isinstance(env_figs, (list, tuple)):
+        for f in env_figs:
+            if hasattr(f, "to_plotly_json"):
+                try:
+                    raw_viz = f.to_plotly_json()
+                    sanitized = _sanitize_for_json(raw_viz)
+                    if sanitized and sanitized not in visualizations:
+                        visualizations.append(sanitized)
+                except Exception:
+                    pass
+
+    # 3. Collect figure from env["fig"]
     fig = env.get("fig")
     visualization = None
     if fig is not None and hasattr(fig, "to_plotly_json"):
         try:
             raw_viz = fig.to_plotly_json()
             visualization = _sanitize_for_json(raw_viz)
+            if visualization and visualization not in visualizations:
+                visualizations.insert(0, visualization)
         except Exception:
             visualization = None
+    elif visualizations:
+        visualization = visualizations[0]
 
     query_output = "\n\n".join([item for item in query_logs if item]).strip() or None
 
@@ -695,6 +743,7 @@ def _execute_in_sandbox(
         "ok": True,
         "rows": _df_to_records(result_df),
         "visualization": visualization,
+        "visualizations": visualizations,
         "query_output": query_output,
         "query_table_rows": query_table_rows,
         "mutation": mutation_flag[0],
@@ -711,6 +760,7 @@ def run_sandboxed(
     active_dataset_id: str | None = None,
     selection_context: dict[str, Any] | None = None,
 ) -> SandboxResult:
+    code = heal_code_escaping_glitches(code)
     result_container: dict[str, Any] = {}
     error_container: dict[str, str] = {}
 
@@ -752,4 +802,5 @@ def run_sandboxed(
         mutation=result_container.get("mutation", False),
         highlight_indices=result_container.get("highlight_indices", []),
         highlighted_columns=result_container.get("highlighted_columns", []),
+        visualizations=result_container.get("visualizations", []),
     )

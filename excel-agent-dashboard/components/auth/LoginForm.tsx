@@ -119,7 +119,7 @@ export function LoginForm() {
       />
 
       {errors.general && (
-        <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-600">
+        <div className="mb-4 rounded-xl border border-red-900/60 bg-red-950/30 p-3 text-xs text-red-300">
           {errors.general}
         </div>
       )}
@@ -158,11 +158,11 @@ export function LoginForm() {
 
       <GoogleButton onClick={handleGoogle} />
 
-      <p className="mt-7 text-center text-sm text-slate-500">
+      <p className="mt-6 text-center text-xs text-slate-400">
         Don&apos;t have an account?{" "}
         <Link
           href="/register"
-          className="font-semibold text-[var(--auth-accent)] hover:underline"
+          className="font-semibold text-emerald-400 hover:text-emerald-300 hover:underline"
         >
           Sign up
         </Link>

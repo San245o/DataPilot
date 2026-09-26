@@ -31,7 +31,6 @@ import {
   normalizeRows,
   seedRows,
   THINKING_MODEL_OPTIONS,
-  transformationSteps,
   type ChatMessage,
   type ColumnRangeSelection,
   type DataGridSelection,
@@ -512,6 +511,19 @@ export function AgentDashboard() {
     await logoutUser()
   }, [isBypassMode, router])
   const [thinkingMode, setThinkingMode] = useState(false)
+  const [isSidebarScrolling, setIsSidebarScrolling] = useState(false)
+  const sidebarScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const handleSidebarScroll = useCallback(() => {
+    setIsSidebarScrolling(true)
+    if (sidebarScrollTimerRef.current) {
+      clearTimeout(sidebarScrollTimerRef.current)
+    }
+    sidebarScrollTimerRef.current = setTimeout(() => {
+      setIsSidebarScrolling(false)
+    }, 900)
+  }, [])
+
   const [undoStack, setUndoStack] = useState<DataMutationHistoryEntry[]>([])
   const [redoStack, setRedoStack] = useState<DataMutationHistoryEntry[]>([])
   const [highlightedChatMessageIndex, setHighlightedChatMessageIndex] = useState<number | null>(null)
@@ -596,6 +608,9 @@ export function AgentDashboard() {
     const timeoutIds = newTableTimeoutsRef.current
     return () => {
       timeoutIds.forEach((timeoutId) => window.clearTimeout(timeoutId))
+      if (sidebarScrollTimerRef.current) {
+        clearTimeout(sidebarScrollTimerRef.current)
+      }
     }
   }, [])
 
@@ -1190,11 +1205,11 @@ export function AgentDashboard() {
     <div className="flex h-dvh flex-col overflow-hidden bg-background text-foreground font-sans antialiased">
       <div className="flex flex-1 min-h-0 overflow-hidden">
         <aside
-          className={`shrink-0 flex flex-col border-r border-border bg-card/50 backdrop-blur-sm transition-all duration-200 ${
+          className={`shrink-0 flex flex-col border-r border-border bg-card/50 backdrop-blur-sm transition-all duration-200 overflow-x-hidden ${
             sidebarCollapsed ? "w-14" : "w-60"
           }`}
         >
-          <div className="flex h-10 items-center justify-end border-b border-border px-2">
+          <div className="shrink-0 flex h-10 items-center justify-end border-b border-border px-2">
             <button
               type="button"
               onClick={() => setSidebarCollapsed((prev) => !prev)}
@@ -1205,7 +1220,7 @@ export function AgentDashboard() {
             </button>
           </div>
 
-          <div className="border-b border-border px-2 py-2">
+          <div className="shrink-0 border-b border-border px-2 py-2">
             <div className={`flex items-center gap-2.5 rounded-lg px-2 py-1.5 ${sidebarCollapsed ? "justify-center" : ""}`}>
               <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-primary-foreground shrink-0">
                 <FileSpreadsheet className="size-4" />
@@ -1215,226 +1230,167 @@ export function AgentDashboard() {
                   <div className="truncate text-sm font-bold tracking-tight text-foreground">DataPilot</div>
                   <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-muted-foreground">
                     <div className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                    <span className="font-medium">{baseShapeLabel}</span>
+                    <span className="font-medium truncate">{baseShapeLabel}</span>
                   </div>
                 </div>
               )}
             </div>
           </div>
 
-          <div className="p-2 space-y-2">
-            <label
-              className={`group flex cursor-pointer items-center gap-2.5 rounded-lg border border-dashed border-border p-2.5 text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground hover:bg-accent/50 ${
-                sidebarCollapsed ? "justify-center" : ""
-              }`}
-            >
-              <Upload className="size-4 shrink-0" />
-              {!sidebarCollapsed && <span className="text-xs font-medium truncate">Upload CSV / XLSX</span>}
-              <input
-                className="hidden"
-                type="file"
-                accept=".csv,.xlsx,.xls"
-                multiple
-                onChange={handleFileUpload}
-              />
-            </label>
+          <div
+            onScroll={handleSidebarScroll}
+            className={`flex-1 min-h-0 overflow-y-auto overflow-x-hidden sidebar-scroll ${
+              isSidebarScrolling ? "is-scrolling" : ""
+            }`}
+          >
+            <div className="p-2 space-y-2">
+              <label
+                className={`group flex cursor-pointer items-center gap-2.5 rounded-lg border border-dashed border-border p-2.5 text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground hover:bg-accent/50 ${
+                  sidebarCollapsed ? "justify-center" : ""
+                }`}
+              >
+                <Upload className="size-4 shrink-0" />
+                {!sidebarCollapsed && <span className="text-xs font-medium truncate">Upload CSV / XLSX</span>}
+                <input
+                  className="hidden"
+                  type="file"
+                  accept=".csv,.xlsx,.xls"
+                  multiple
+                  onChange={handleFileUpload}
+                />
+              </label>
 
-            <button
-              type="button"
-              onClick={handleDownloadExcel}
-              disabled={!visibleGridExport || visibleGridExport.rows.length === 0}
-              className={`w-full group flex items-center gap-2.5 rounded-lg border border-dashed border-border p-2.5 text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground hover:bg-accent/50 disabled:opacity-50 disabled:cursor-not-allowed ${
-                sidebarCollapsed ? "justify-center" : ""
-              }`}
-              title="Download current data grid"
-            >
-              <Download className="size-4 shrink-0" />
-              {!sidebarCollapsed && <span className="text-xs font-medium truncate">Download Excel</span>}
-            </button>
+              <button
+                type="button"
+                onClick={handleDownloadExcel}
+                disabled={!visibleGridExport || visibleGridExport.rows.length === 0}
+                className={`w-full group flex items-center gap-2.5 rounded-lg border border-dashed border-border p-2.5 text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground hover:bg-accent/50 disabled:opacity-50 disabled:cursor-not-allowed ${
+                  sidebarCollapsed ? "justify-center" : ""
+                }`}
+                title="Download current data grid"
+              >
+                <Download className="size-4 shrink-0" />
+                {!sidebarCollapsed && <span className="text-xs font-medium truncate">Download Excel</span>}
+              </button>
 
-            <button
-              type="button"
-              onClick={handleDownloadWorkspaceZip}
-              disabled={!activeDataset || activeDataset.rows.length === 0}
-              className={`w-full group flex items-center gap-2.5 rounded-lg border border-dashed border-border p-2.5 text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground hover:bg-accent/50 disabled:opacity-50 disabled:cursor-not-allowed ${
-                sidebarCollapsed ? "justify-center" : ""
-              }`}
-              title="Download workspace ZIP"
-            >
-              <Archive className="size-4 shrink-0" />
-              {!sidebarCollapsed && <span className="text-xs font-medium truncate">Download ZIP</span>}
-            </button>
+              <button
+                type="button"
+                onClick={handleDownloadWorkspaceZip}
+                disabled={!activeDataset || activeDataset.rows.length === 0}
+                className={`w-full group flex items-center gap-2.5 rounded-lg border border-dashed border-border p-2.5 text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground hover:bg-accent/50 disabled:opacity-50 disabled:cursor-not-allowed ${
+                  sidebarCollapsed ? "justify-center" : ""
+                }`}
+                title="Download workspace ZIP"
+              >
+                <Archive className="size-4 shrink-0" />
+                {!sidebarCollapsed && <span className="text-xs font-medium truncate">Download ZIP</span>}
+              </button>
 
-            <button
-              type="button"
-              onClick={handleAutoReport}
-              disabled={datasets.length === 0}
-              className={`w-full group flex items-center gap-2.5 rounded-lg border border-dashed border-border p-2.5 text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground hover:bg-accent/50 disabled:opacity-50 disabled:cursor-not-allowed ${
-                sidebarCollapsed ? "justify-center" : ""
-              }`}
-              title="Generate Auto Report"
-            >
-              <FileText className="size-4 shrink-0" />
-              {!sidebarCollapsed && <span className="text-xs font-medium truncate">Auto Report</span>}
-            </button>
-          </div>
+              <button
+                type="button"
+                onClick={handleAutoReport}
+                disabled={datasets.length === 0}
+                className={`w-full group flex items-center gap-2.5 rounded-lg border border-dashed border-border p-2.5 text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground hover:bg-accent/50 disabled:opacity-50 disabled:cursor-not-allowed ${
+                  sidebarCollapsed ? "justify-center" : ""
+                }`}
+                title="Generate Auto Report"
+              >
+                <FileText className="size-4 shrink-0" />
+                {!sidebarCollapsed && <span className="text-xs font-medium truncate">Auto Report</span>}
+              </button>
+            </div>
 
-          {!sidebarCollapsed && (
-            <div className="min-h-0 border-y border-border/70 px-2 py-2">
-              <div className="mb-1 px-1 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
-                Datasets
-              </div>
-              <div className="max-h-44 space-y-1 overflow-y-auto pr-1 scrollbar-thin">
-                {datasets.map((dataset) => {
-                  const isActive = dataset.id === activeDataset?.id
-                  return (
-                    <div
-                      key={dataset.id}
-                      onContextMenu={(event) => {
-                        event.preventDefault()
-                        event.stopPropagation()
-                        setDatasetContextMenu({
-                          datasetId: dataset.id,
-                          x: Math.max(8, Math.min(event.clientX, window.innerWidth - 190)),
-                          y: Math.max(8, Math.min(event.clientY, window.innerHeight - 64)),
-                        })
-                      }}
-                      className={`flex items-center gap-1 rounded-md px-1.5 py-1 transition-colors ${
-                        isActive
-                          ? "bg-emerald-500/15 text-emerald-700 ring-1 ring-emerald-500/25 dark:text-emerald-300"
-                          : "text-muted-foreground hover:bg-accent hover:text-foreground"
-                      }`}
-                    >
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setActiveDatasetId(dataset.id)
-                          setActiveDataTab("base")
-                          setHighlightedRows(new Set())
-                          setHighlightedColumns([])
-                          setGridSelection(EMPTY_GRID_SELECTION)
-                          setAttachedSelectionContext(null)
+            {!sidebarCollapsed && datasets.length > 0 && (
+              <div className="border-t border-border/70 p-2">
+                <div className="mb-1.5 px-1 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
+                  Datasets
+                </div>
+                <div className="space-y-1">
+                  {datasets.map((dataset) => {
+                    const isActive = dataset.id === activeDataset?.id
+                    return (
+                      <div
+                        key={dataset.id}
+                        onContextMenu={(event) => {
+                          event.preventDefault()
+                          event.stopPropagation()
+                          setDatasetContextMenu({
+                            datasetId: dataset.id,
+                            x: Math.max(8, Math.min(event.clientX, window.innerWidth - 190)),
+                            y: Math.max(8, Math.min(event.clientY, window.innerHeight - 64)),
+                          })
                         }}
-                        className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
-                        title={dataset.displayName}
-                      >
-                        <Database className="size-3 shrink-0" />
-                        <span className="truncate text-[11px] font-medium">{dataset.displayName}</span>
-                        {dataset.modified && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400" />}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleDownloadDataset(dataset)}
-                        className={`flex h-5 w-5 shrink-0 items-center justify-center rounded transition-colors ${
+                        className={`flex w-full min-w-0 items-center gap-1 overflow-hidden rounded-md px-1.5 py-1 transition-colors ${
                           isActive
-                            ? "text-emerald-700 hover:bg-emerald-500/15 dark:text-emerald-300"
+                            ? "bg-emerald-500/15 text-emerald-700 ring-1 ring-emerald-500/25 dark:text-emerald-300"
                             : "text-muted-foreground hover:bg-accent hover:text-foreground"
                         }`}
-                        title="Download dataset"
                       >
-                        <Download className="size-3" />
-                      </button>
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-          )}
-
-          <div className="px-2 py-2 space-y-1">
-            {!sidebarCollapsed && (
-              <div className="px-1 mb-1 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
-                Workflow
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setActiveDatasetId(dataset.id)
+                            setActiveDataTab("base")
+                            setHighlightedRows(new Set())
+                            setHighlightedColumns([])
+                            setGridSelection(EMPTY_GRID_SELECTION)
+                            setAttachedSelectionContext(null)
+                          }}
+                          className="flex min-w-0 flex-1 items-center gap-1.5 text-left overflow-hidden"
+                          title={dataset.displayName}
+                        >
+                          <Database className="size-3 shrink-0" />
+                          <span className="truncate text-[11px] font-medium min-w-0">{dataset.displayName}</span>
+                          {dataset.modified && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400" />}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDownloadDataset(dataset)}
+                          className={`flex h-5 w-5 shrink-0 items-center justify-center rounded transition-colors ${
+                            isActive
+                              ? "text-emerald-700 hover:bg-emerald-500/15 dark:text-emerald-300"
+                              : "text-muted-foreground hover:bg-accent hover:text-foreground"
+                          }`}
+                          title="Download dataset"
+                        >
+                          <Download className="size-3" />
+                        </button>
+                      </div>
+                    )
+                  })}
+                </div>
               </div>
             )}
 
-            {transformationSteps.map((step, index) => {
-              const Icon = step.icon
+            <div className="border-t border-border/70 p-2 space-y-1">
+              <button
+                type="button"
+                onClick={toggleTheme}
+                className={`w-full flex items-center gap-2.5 rounded-md px-2.5 py-2 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground ${
+                  sidebarCollapsed ? "justify-center" : ""
+                }`}
+                title={isDark ? "Switch to light mode" : "Switch to dark mode"}
+              >
+                {isDark ? <Sun className="size-3.5 shrink-0" /> : <Moon className="size-3.5 shrink-0" />}
+                {!sidebarCollapsed && <span className="font-medium">{isDark ? "Light mode" : "Dark mode"}</span>}
+              </button>
 
-              if (step.isContextButton) {
-                return (
-                  <div key={step.label} className="group relative">
-                    <button
-                      type="button"
-                      className={`flex items-center w-full gap-2.5 rounded-md px-2.5 py-2 text-xs transition-colors ${
-                        sidebarCollapsed ? "justify-center" : ""
-                      } text-muted-foreground hover:bg-accent hover:text-foreground`}
-                      title={step.label}
-                    >
-                      <Icon className="size-3.5 shrink-0" />
-                      {!sidebarCollapsed && (
-                        <div className="flex flex-1 items-center justify-between">
-                          <span className="font-medium">{step.label}</span>
-                          <ChevronRight className="size-3.5" />
-                        </div>
-                      )}
-                    </button>
-
-                    <div className="pointer-events-none absolute left-full top-0 z-[1000] ml-2 w-48 rounded-xl opacity-0 shadow-xl transition-all duration-200 ease-[var(--menu-ease)] group-hover:pointer-events-auto group-hover:translate-x-0 group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:translate-x-0 group-focus-within:opacity-100 translate-x-1">
-                      <div className="menu-surface space-y-1.5 rounded-xl p-2.5 text-xs text-muted-foreground">
-                        <div className="flex items-center justify-between rounded bg-secondary/50 px-2 py-1.5">
-                          <span>Queries:</span>
-                          <span className="font-medium text-foreground">{queryCount}</span>
-                        </div>
-                        <div className="flex items-center justify-between rounded bg-secondary/50 px-2 py-1.5">
-                          <span>Prompt:</span>
-                          <span className="font-medium text-foreground">{totalTokens.prompt.toLocaleString()}</span>
-                        </div>
-                        <div className="flex items-center justify-between rounded bg-secondary/50 px-2 py-1.5">
-                          <span>Completion:</span>
-                          <span className="font-medium text-foreground">{totalTokens.completion.toLocaleString()}</span>
-                        </div>
-                        <div className="flex items-center justify-between rounded bg-primary/10 px-2 py-1.5 text-primary">
-                          <span className="font-semibold">Total Tokens:</span>
-                          <span className="font-bold">{totalTokens.total.toLocaleString()}</span>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                )
-              }
-
-              return (
-                <div
-                  key={step.label}
-                  className={`flex items-center gap-2.5 rounded-md px-2.5 py-2 text-xs transition-colors ${
-                    sidebarCollapsed ? "justify-center" : ""
-                  } ${index === 0 ? "bg-primary/10 text-primary" : "text-muted-foreground"}`}
-                  title={step.label}
-                >
-                  <Icon className="size-3.5 shrink-0" />
-                  {!sidebarCollapsed && <span className="font-medium">{step.label}</span>}
-                </div>
-              )
-            })}
-
-            <button
-              type="button"
-              onClick={toggleTheme}
-              className={`w-full flex items-center gap-2.5 rounded-md px-2.5 py-2 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground ${
-                sidebarCollapsed ? "justify-center" : ""
-              }`}
-              title={isDark ? "Switch to light mode" : "Switch to dark mode"}
-            >
-              {isDark ? <Sun className="size-3.5 shrink-0" /> : <Moon className="size-3.5 shrink-0" />}
-              {!sidebarCollapsed && <span className="font-medium">{isDark ? "Light mode" : "Dark mode"}</span>}
-            </button>
-
-            <button
-              type="button"
-              onClick={handleLogout}
-              className={`w-full flex items-center gap-2.5 rounded-md px-2.5 py-2 text-xs text-destructive/80 transition-colors hover:bg-destructive/10 hover:text-destructive ${
-                sidebarCollapsed ? "justify-center" : ""
-              }`}
-              title="Sign Out"
-            >
-              <LogOut className="size-3.5 shrink-0" />
-              {!sidebarCollapsed && <span className="font-medium">Sign Out</span>}
-            </button>
+              <button
+                type="button"
+                onClick={handleLogout}
+                className={`w-full flex items-center gap-2.5 rounded-md px-2.5 py-2 text-xs text-destructive/80 transition-colors hover:bg-destructive/10 hover:text-destructive ${
+                  sidebarCollapsed ? "justify-center" : ""
+                }`}
+                title="Sign Out"
+              >
+                <LogOut className="size-3.5 shrink-0" />
+                {!sidebarCollapsed && <span className="font-medium">Sign Out</span>}
+              </button>
+            </div>
           </div>
 
           {!sidebarCollapsed && (
-            <div className="mt-auto border-t border-border p-3 space-y-3">
+            <div className="shrink-0 border-t border-border p-3 space-y-3">
               {isBypassMode && (
                 <div className="flex items-center gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-[10px] font-semibold text-amber-400">
                   <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
@@ -1487,6 +1443,13 @@ export function AgentDashboard() {
                   })}
                 </div>
               </div>
+
+              {totalTokens.total > 0 && (
+                <div className="flex items-center justify-between rounded-lg bg-secondary/40 px-2.5 py-1.5 text-[11px] text-muted-foreground">
+                  <span>Tokens used</span>
+                  <span className="font-semibold text-foreground tabular-nums">{totalTokens.total.toLocaleString()}</span>
+                </div>
+              )}
             </div>
           )}
         </aside>

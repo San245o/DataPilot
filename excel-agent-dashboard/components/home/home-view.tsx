@@ -121,7 +121,7 @@ function NewCard({
       href={card.to}
       className={`card-lift group flex flex-col rounded-2xl border p-6 ${
         card.featured
-          ? "border-primary/25 bg-card shadow-[0_0_40px_-12px_oklch(0.72_0.17_160/25%)]"
+          ? "border-primary/40 bg-card shadow-sm"
           : "border-border bg-card"
       }`}
     >
@@ -137,7 +137,7 @@ function NewCard({
       <span
         className={`mt-5 inline-flex w-fit items-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-medium transition-all ${
           card.featured
-            ? "bg-primary text-primary-foreground group-hover:shadow-[0_0_20px_oklch(0.72_0.17_160/40%)]"
+            ? "bg-primary text-primary-foreground hover:opacity-90"
             : "border border-border bg-secondary text-secondary-foreground group-hover:border-primary/40 group-hover:text-primary"
         }`}
       >
@@ -208,7 +208,7 @@ function RecentList() {
           </p>
           <Link
             href="/dashboard"
-            className="mt-6 inline-flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground transition-shadow hover:shadow-[0_0_20px_oklch(0.72_0.17_160/40%)]"
+            className="mt-6 inline-flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90"
           >
             Start your first analysis
             <ArrowRight className="size-4" />
@@ -235,7 +235,7 @@ function TutorialCard({
         <div className="bg-grid-texture absolute inset-0" />
         <div className="absolute inset-0 bg-gradient-to-t from-card/60 to-transparent" />
         <Icon className="relative size-10 text-primary/60 transition-transform duration-300 group-hover:scale-110" strokeWidth={1.5} />
-        <span className="absolute bottom-3 left-3 flex size-9 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-[0_0_16px_oklch(0.72_0.17_160/45%)] transition-transform duration-300 group-hover:scale-110">
+        <span className="absolute bottom-3 left-3 flex size-9 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-sm transition-transform duration-300 group-hover:scale-110">
           <Play className="ml-0.5 size-4" fill="currentColor" />
         </span>
         <span className="absolute bottom-3 right-3 rounded-md bg-background/80 px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground backdrop-blur-sm">
