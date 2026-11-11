@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from collections import OrderedDict
 from datetime import datetime, timezone
 from itertools import count
 import json
 import logging
-from queue import Queue
+from queue import Empty, Queue
 import threading
 from typing import Any
 from uuid import uuid4
@@ -15,21 +16,24 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 
-from agent import supports_thinking_model
-from auth import get_current_user
+from agent import THINKING_MODEL
+from auth import FRONTEND_ORIGINS, get_current_user, router as auth_router
+from image_import import router as image_import_router
 from schemas import AgentRequest, AgentResponse, DatasetRegisterRequest, DatasetRegisterResponse, ReportRequest
-from report import generate_auto_report
+from report import REPORT_ANALYST_MODEL, ReportUnavailable, generate_auto_report
 from thinking import run_thinking_agent
 from workflow import build_workflow
 
 load_dotenv()
 
 app = FastAPI(title="Excel Agent Backend", version="3.0.0")
+app.include_router(auth_router)
+app.include_router(image_import_router)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=FRONTEND_ORIGINS,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -40,6 +44,7 @@ logger = logging.getLogger("excel-agent-backend")
 _workflow = None
 _dataset_store: OrderedDict[str, dict[str, Any]] = OrderedDict()
 MAX_CACHED_DATASETS = 100
+THINKING_STREAM_HEARTBEAT_SECONDS = 10
 
 
 def get_workflow():
@@ -159,6 +164,7 @@ def _build_agent_response(payload: dict[str, Any], default_rows: list[dict[str, 
         updated_datasets=_safe_get(payload, "updated_datasets", []),
         created_datasets=_safe_get(payload, "created_datasets", []),
         visualization=_safe_get(payload, "visualization"),
+        visualizations=_safe_get(payload, "visualizations", []),
         query_output=_safe_get(payload, "query_output"),
         query_tables=_safe_get(payload, "query_tables", []),
         code=_safe_get(payload, "code", ""),
@@ -213,7 +219,7 @@ def _require_model_name(model_name: str) -> str:
             status_code=400,
             detail="Model is required. The backend will not silently fall back to Gemini 3.1 Flash Lite.",
         )
-    return normalized
+    return THINKING_MODEL if normalized.casefold().removeprefix("models/").startswith("gemma-") else normalized
 
 
 @app.get("/health")
@@ -299,19 +305,12 @@ def execute_thinking_agent(
     rows = _resolve_rows(payload, user_id=user_id)
     if not rows:
         raise HTTPException(status_code=400, detail="Upload data first")
-    model_name = _require_model_name(payload.model)
-    if not supports_thinking_model(model_name):
-        raise HTTPException(
-            status_code=400,
-            detail="Thinking mode only supports Gemma 4 31B IT and Minimax m2.5.",
-        )
-    logger.info("agent.think user=%s model=%s thinking=%s rows=%s", user_id, model_name, payload.thinking_mode, len(rows))
+    logger.info("agent.think user=%s model=%s rows=%s", user_id, THINKING_MODEL, len(rows))
 
     try:
         result = run_thinking_agent(
             prompt=payload.prompt,
             rows=rows,
-            model_name=model_name,
             history=[m.model_dump() for m in payload.history],
             datasets=_resolve_selected_datasets(payload, user_id=user_id),
             active_dataset_id=payload.active_dataset_id or payload.dataset_id,
@@ -319,8 +318,9 @@ def execute_thinking_agent(
             dataset_names=payload.dataset_names,
             selection_context=payload.selection_context,
         )
+        response = _build_agent_response(result, rows)
         _persist_response_datasets(result, payload.dataset_names, user_id=user_id)
-        return _build_agent_response(result, rows)
+        return response
     except HTTPException:
         raise
     except Exception as exc:
@@ -328,7 +328,7 @@ def execute_thinking_agent(
 
 
 @app.post("/agent/think/stream")
-def execute_thinking_agent_stream(
+async def execute_thinking_agent_stream(
     payload: AgentRequest,
     current_user: dict[str, Any] = Depends(get_current_user),
 ) -> StreamingResponse:
@@ -336,56 +336,62 @@ def execute_thinking_agent_stream(
     rows = _resolve_rows(payload, user_id=user_id)
     if not rows:
         raise HTTPException(status_code=400, detail="Upload data first")
-    model_name = _require_model_name(payload.model)
-    if not supports_thinking_model(model_name):
-        raise HTTPException(
-            status_code=400,
-            detail="Thinking mode only supports Gemma 4 31B IT and Minimax m2.5.",
-        )
-    logger.info("agent.think.stream user=%s model=%s thinking=%s rows=%s", user_id, model_name, payload.thinking_mode, len(rows))
+    logger.info("agent.think.stream user=%s model=%s rows=%s", user_id, THINKING_MODEL, len(rows))
 
-    event_queue: Queue[dict[str, Any] | None] = Queue()
+    datasets = _resolve_selected_datasets(payload, user_id=user_id)
+    loop = asyncio.get_running_loop()
+    event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    disconnected = threading.Event()
 
     def emit(event: dict[str, Any]) -> None:
-        event_queue.put(event)
+        if disconnected.is_set():
+            raise RuntimeError("Thinking stream closed")
+        loop.call_soon_threadsafe(event_queue.put_nowait, event)
 
     def runner() -> None:
         try:
             result = run_thinking_agent(
                 prompt=payload.prompt,
                 rows=rows,
-                model_name=model_name,
                 history=[m.model_dump() for m in payload.history],
-                datasets=_resolve_selected_datasets(payload, user_id=user_id),
+                datasets=datasets,
                 active_dataset_id=payload.active_dataset_id or payload.dataset_id,
                 selected_dataset_ids=payload.selected_dataset_ids,
                 dataset_names=payload.dataset_names,
                 selection_context=payload.selection_context,
                 event_callback=lambda entry: emit({"type": "trace", "entry": entry}),
             )
-            _persist_response_datasets(result, payload.dataset_names, user_id=user_id)
             response = _build_agent_response(result, rows)
-            emit({"type": "final", "payload": response.model_dump(mode="json")})
+            event = {"type": "final", "payload": json.loads(response.model_dump_json())}
+            if not disconnected.is_set():
+                _persist_response_datasets(result, payload.dataset_names, user_id=user_id)
+                emit(event)
         except Exception as exc:
-            logger.exception("agent.think.stream failed model=%s", model_name)
-            emit({"type": "error", "error": str(exc) or "Thinking agent error"})
+            if not disconnected.is_set():
+                logger.exception("agent.think.stream failed model=%s", THINKING_MODEL)
+                loop.call_soon_threadsafe(
+                    event_queue.put_nowait, {"type": "error", "error": str(exc) or "Thinking agent error"}
+                )
+
+    async def stream():
+        threading.Thread(target=runner, daemon=True).start()
+        try:
+            while True:
+                try:
+                    item = await asyncio.wait_for(event_queue.get(), timeout=THINKING_STREAM_HEARTBEAT_SECONDS)
+                except TimeoutError:
+                    item = {"type": "heartbeat"}
+                yield json.dumps(item) + "\n"
+                if item["type"] in {"final", "error"}:
+                    return
         finally:
-            event_queue.put(None)
-
-    threading.Thread(target=runner, daemon=True).start()
-
-    def stream():
-        while True:
-            item = event_queue.get()
-            if item is None:
-                break
-            yield json.dumps(item) + "\n"
+            disconnected.set()
 
     return StreamingResponse(
         stream(),
         media_type="application/x-ndjson",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control": "no-cache, no-transform",
             "X-Accel-Buffering": "no",
         },
     )
@@ -402,9 +408,7 @@ def execute_auto_report_stream(
     rows = list(cached.get("rows") or [])
     if not rows:
         raise HTTPException(status_code=400, detail="The active dataset is empty.")
-    model_name = _require_model_name(payload.model)
-    if not supports_thinking_model(model_name):
-        raise HTTPException(status_code=400, detail="Auto Report requires a Thinking Mode model.")
+    model_name = REPORT_ANALYST_MODEL
 
     # Capture identity, name, and rows before the background thread starts. Later UI
     # dataset changes cannot retarget this report run.
@@ -412,6 +416,7 @@ def execute_auto_report_stream(
     dataset_name = str(cached.get("name") or "Dataset")
     frozen_rows = [dict(row) for row in rows]
     event_queue: Queue[dict[str, Any] | None] = Queue()
+    stop = threading.Event()
     sequence = count(1)
 
     def queue_trace(entry: dict[str, Any]) -> None:
@@ -435,27 +440,34 @@ def execute_auto_report_stream(
                 rows=frozen_rows,
                 model_name=model_name,
                 event_callback=queue_trace,
+                progress_callback=event_queue.put,
+                stop=stop,
             )
-            event_queue.put({"type": "final", "payload": report})
-            logger.info("report final event queued dataset=%s", dataset_id)
+            if report is not None and not stop.is_set():
+                event_queue.put({"type": "final", "payload": report})
+        except ReportUnavailable as exc:
+            event_queue.put({"type": "error", "error": str(exc)})
         except Exception as exc:
             logger.exception("agent.report.stream failed dataset=%s", dataset_id)
             queue_trace({"kind": "observation", "content": "Report generation failed before the final report could be completed.", "status": "error"})
-            event_queue.put({"type": "error", "error": str(exc) or "Auto Report failed"})
+            event_queue.put({"type": "error", "error": "Auto Report could not finish. Try running it again."})
         finally:
             event_queue.put(None)
             logger.info("report stream sentinel queued dataset=%s", dataset_id)
 
-    threading.Thread(target=runner, daemon=True).start()
-
-    def stream():
+    async def stream():
+        threading.Thread(target=runner, daemon=True).start()
         try:
             while True:
-                item = event_queue.get()
+                try:
+                    item = await asyncio.to_thread(event_queue.get, True, 0.5)
+                except Empty:
+                    continue
                 if item is None:
                     break
                 yield json.dumps(item, default=str) + "\n"
         finally:
+            stop.set()
             logger.info("report stream closed dataset=%s", dataset_id)
 
     return StreamingResponse(

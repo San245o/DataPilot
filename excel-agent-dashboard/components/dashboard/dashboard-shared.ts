@@ -81,6 +81,7 @@ export type DataSelectionContext = {
 }
 
 export type ThinkingTraceEntry = {
+  call_id?: string
   kind: "thought" | "action" | "observation"
   content: string
   sequence?: number
@@ -117,6 +118,7 @@ export type AgentExecuteResponse = {
     modified?: boolean
   }>
   visualization?: VisualizationPayload | null
+  visualizations?: VisualizationPayload[]
   query_output?: string | null
   query_tables?: QueryTablePayload[]
   code?: string
@@ -132,6 +134,7 @@ export type AgentExecuteResponse = {
 
 export type ChatMessage = {
   role: "user" | "assistant"
+  datasetScope?: string[]
   content: string
   code?: string
   query_output?: string | null
@@ -141,6 +144,8 @@ export type ChatMessage = {
   isStreaming?: boolean
   sources?: Array<{ title: string; url: string }>
 }
+
+export const DATASET_DRAG_TYPE = "application/x-datapilot-dataset"
 
 export type VizWidget = {
   id: string
@@ -194,22 +199,19 @@ export const INITIAL_CHAT_MESSAGES: ChatMessage[] = [
 
 
 export const MODEL_OPTIONS = [
+  { value: "gemini-3.8-flash", label: "Gemini 3.8 Flash" },
+  { value: "gemini-3.7-flash", label: "Gemini 3.7 Flash" },
+  { value: "gemini-3.6-flash", label: "Gemini 3.6 Flash" },
+  { value: "gemini-3.5-flash-lite", label: "Gemini 3.5 Flash Lite" },
   { value: "gemini-3-flash-preview", label: "Gemini 3 Flash" },
   { value: "gemini-3.1-flash-lite-preview", label: "Gemini 3.1 Flash Lite" },
-  { value: "models/gemma-4-31b-it", label: "Gemma 4 31B IT" },
   { value: "gpt-4o-mini", label: "GPT-4o Mini (Fast)" },
   { value: "gpt-4o", label: "GPT-4o (GitHub Models)" },
   { value: "minimaxai/minimax-m2.5", label: "Minimax m2.5" },
   { value: "meta/llama-3.1-405b-instruct", label: "Llama 3.1 405B (NVIDIA)" },
 ] as const
 
-export const DEFAULT_THINKING_MODEL = "models/gemma-4-31b-it" as const
-
-export const THINKING_MODEL_OPTIONS = MODEL_OPTIONS.filter(
-  (option) =>
-    option.value === DEFAULT_THINKING_MODEL ||
-    option.value === "minimaxai/minimax-m2.5"
-)
+export const THINKING_MODEL = "gemini-3.5-flash-lite" as const
 
 export const SLASH_COMMANDS: SlashCommandOption[] = [
   { command: "/visualize", description: "Build a chart (bar, line, scatter, pie, heatmap).", rewritePrefix: "Create a visualization." },

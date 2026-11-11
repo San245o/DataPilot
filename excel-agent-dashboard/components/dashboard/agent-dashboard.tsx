@@ -13,6 +13,7 @@ import {
   Download,
   FileSpreadsheet,
   FileText,
+  ImagePlus,
   LogOut,
   Moon,
   Sun,
@@ -24,13 +25,13 @@ import { getClientSession, logoutUser } from "@/lib/auth/client"
 
 import {
   clamp,
-  DEFAULT_THINKING_MODEL,
+  DATASET_DRAG_TYPE,
   getNextWidgetZIndex,
   INITIAL_CHAT_MESSAGES,
   MODEL_OPTIONS,
   normalizeRows,
   seedRows,
-  THINKING_MODEL_OPTIONS,
+  THINKING_MODEL,
   type ChatMessage,
   type ColumnRangeSelection,
   type DataGridSelection,
@@ -47,7 +48,9 @@ import {
 import { CanvasBoard } from "@/components/dashboard/components/canvas-board"
 import { ChatPanel } from "@/components/dashboard/components/chat-panel"
 import { DataGrid } from "@/components/dashboard/components/data-grid"
-import { API_BASE_URL, useAgentRunner } from "@/components/dashboard/hooks/use-agent-runner"
+import { PhotoImport } from "@/components/dashboard/components/photo-import"
+import { useAgentRunner } from "@/components/dashboard/hooks/use-agent-runner"
+import { apiFetch } from "@/lib/api"
 
 const initialDataset: WorkspaceDataset = {
   id: "seed-dataset",
@@ -301,24 +304,36 @@ function makeDatasetDisplayName(fileName: string, sheetName?: string) {
 
 function resolvePromptDatasetIds(prompt: string, datasets: WorkspaceDataset[]) {
   const promptLower = prompt.toLowerCase()
-  const matches: Array<{ id: string; index: number }> = []
-
-  datasets.forEach((dataset) => {
-    const candidates = [dataset.displayName, dataset.fileName]
-
-    const matchIndex = candidates
-      .map((candidate) => promptLower.indexOf(`@${candidate.toLowerCase()}`))
-      .filter((index) => index >= 0)
-      .sort((a, b) => a - b)[0]
-
-    if (matchIndex !== undefined) {
-      matches.push({ id: dataset.id, index: matchIndex })
+  const aliases = datasets.flatMap((dataset) =>
+    [dataset.displayName, dataset.fileName].map((name) => ({
+      token: `@${name.toLowerCase()}`,
+      id: dataset.id,
+    }))
+  ).sort((a, b) => b.token.length - a.token.length)
+  const ids = new Set<string>()
+  for (const mention of promptLower.matchAll(/(?<![\w@])@/g)) {
+    const text = promptLower.slice(mention.index)
+    const match = aliases.find(({ token }) =>
+      text.startsWith(token) && /^(?:$|[\s,;:!?)\]]|\.(?:\s|$))/.test(text.slice(token.length))
+    )
+    if (!match) continue
+    for (const alias of aliases) {
+      if (alias.token === match.token) ids.add(alias.id)
     }
-  })
+  }
+  return [...ids]
+}
 
-  return matches
-    .sort((a, b) => a.index - b.index)
-    .map((match) => match.id)
+function asksForAllDatasets(prompt: string) {
+  return /\b(?:all (?:the )?(?:\d+ )?(?:(?:uploaded|open|available|workspace) )?(?:files|datasets|workbooks|sheets)|every (?:(?:uploaded|open) )?(?:file|dataset|workbook|sheet))\b/i.test(prompt)
+}
+
+function asksForDatasetInventory(prompt: string) {
+  return /^(?:(?:what|which) (?:all |are (?:all )?(?:the )?)?(?:uploaded |attached |open |available )?(?:files|datasets|workbooks|sheets)(?: (?:can (?:you|u) (?:see|view|access)|are (?:you|u) able to (?:see|view|access)|are (?:available|loaded|uploaded|attached)))?|(?:list|show)(?: me)? (?:all |the )?(?:uploaded |attached |available )?(?:files|datasets|workbooks|sheets))[?.!]*$/i.test(prompt)
+}
+
+function asksForPreviousTable(prompt: string) {
+  return /^(?:(?:what|which) stats\?\s*)?(?:have (?:you|u) (?:made|created|generated) (?:a|the) table|(?:show(?: me)?|open|where is) (?:the|that|previous|last) (?:result )?table)[?.!]*$/i.test(prompt)
 }
 
 function uniqueDatasetIds(ids: string[]) {
@@ -326,7 +341,7 @@ function uniqueDatasetIds(ids: string[]) {
 }
 
 async function registerDataset(name: string, rows: SheetRow[]) {
-  const response = await fetch(`${API_BASE_URL}/dataset/register`, {
+  const response = await apiFetch("/dataset/register", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name, rows }),
@@ -465,9 +480,12 @@ export function AgentDashboard() {
   const router = useRouter()
   const [datasets, setDatasets] = useState<WorkspaceDataset[]>([initialDataset])
   const [activeDatasetId, setActiveDatasetId] = useState(initialDataset.id)
-  const [attachedDatasetIds, setAttachedDatasetIds] = useState<string[]>([])
-  const [modelName, setModelName] = useState("gemini-3.1-flash-lite-preview")
+  const [modelName, setModelName] = useState<string>(THINKING_MODEL)
   const [prompt, setPrompt] = useState("")
+  const [attachedDatasetIds, setAttachedDatasetIds] = useState<string[]>([])
+  const [isUploading, setIsUploading] = useState(false)
+  const [showPhotoImport, setShowPhotoImport] = useState(false)
+  const uploadingRef = useRef(false)
   const [widgets, setWidgets] = useState<VizWidget[]>([])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [isDark, setIsDark] = useState(true)
@@ -485,7 +503,6 @@ export function AgentDashboard() {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(INITIAL_CHAT_MESSAGES)
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
   const [userEmail, setUserEmail] = useState<string | null>(null)
-  const [isBypassMode, setIsBypassMode] = useState<boolean>(false)
 
   useEffect(() => {
     getClientSession().then((session) => {
@@ -493,23 +510,8 @@ export function AgentDashboard() {
         setUserEmail(session.email)
       }
     })
-    fetch("/api/auth/session")
-      .then((res) => res.json())
-      .then((data) => {
-        if (data?.isBypassMode) {
-          setIsBypassMode(true)
-        }
-      })
-      .catch(() => {})
   }, [])
 
-  const handleLogout = useCallback(async () => {
-    if (isBypassMode) {
-      router.push("/")
-      return
-    }
-    await logoutUser()
-  }, [isBypassMode, router])
   const [thinkingMode, setThinkingMode] = useState(false)
   const [isSidebarScrolling, setIsSidebarScrolling] = useState(false)
   const sidebarScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -541,11 +543,35 @@ export function AgentDashboard() {
   const modelMenuRef = useRef<HTMLDivElement | null>(null)
 
   const { cancelRun, clearError, error, isRunning, runAgent, setError } = useAgentRunner()
+  const handleLogout = useCallback(async () => {
+    try {
+      await logoutUser()
+    } catch {
+      setError("Sign-out failed. Please try again.")
+    }
+  }, [setError])
+
 
   const activeDataset = useMemo(
     () => datasets.find((dataset) => dataset.id === activeDatasetId) ?? datasets[0],
     [activeDatasetId, datasets]
   )
+  const draftScope = useMemo(() => {
+    const available = datasets.filter((dataset) => dataset.id !== initialDataset.id)
+    const mentioned = resolvePromptDatasetIds(prompt, available)
+    const validAttachments = attachedDatasetIds.filter((id) => available.some((dataset) => dataset.id === id))
+    const explicitIds = uniqueDatasetIds([...mentioned, ...validAttachments])
+    const activeId = activeDataset?.id !== initialDataset.id ? activeDataset?.id : undefined
+    const allIds = asksForAllDatasets(prompt) ? available.map((dataset) => dataset.id) : []
+    const ids = explicitIds.length ? explicitIds : uniqueDatasetIds([...(activeId ? [activeId] : []), ...allIds])
+    return {
+      ids,
+      visible: (explicitIds.length || allIds.length ? ids : []).flatMap((id) =>
+        available.filter((dataset) => dataset.id === id)
+      ),
+      detachableIds: validAttachments.filter((id) => !mentioned.includes(id)),
+    }
+  }, [activeDataset?.id, attachedDatasetIds, datasets, prompt])
   const rows = useMemo(() => activeDataset?.rows ?? [], [activeDataset])
   const activeColumns = useMemo(() => Object.keys(rows[0] ?? {}), [rows])
   const activePivotTable = useMemo(
@@ -565,14 +591,8 @@ export function AgentDashboard() {
     [activeColumns, activeDataTab, activeDataset, gridSelection, rows]
   )
 
-  const availableModels = useMemo(
-    () => (thinkingMode ? THINKING_MODEL_OPTIONS : MODEL_OPTIONS),
-    [thinkingMode]
-  )
-  const selectedModelLabel = useMemo(
-    () => availableModels.find((option) => option.value === modelName)?.label ?? modelName,
-    [availableModels, modelName]
-  )
+  const requestModel = thinkingMode ? THINKING_MODEL : modelName
+  const selectedModelLabel = MODEL_OPTIONS.find((option) => option.value === requestModel)?.label ?? requestModel
 
   const baseShapeLabel = useMemo(() => {
     const baseColumnCount = Object.keys(rows[0] ?? {}).length
@@ -694,21 +714,19 @@ export function AgentDashboard() {
   }, [])
 
   const toggleThinkingMode = useCallback(() => {
-    setThinkingMode((prev) => {
-      const next = !prev
-      if (next) {
-        setModelName(DEFAULT_THINKING_MODEL)
-      }
-      return next
-    })
+    setThinkingMode((prev) => !prev)
     setModelMenuOpen(false)
   }, [])
 
-  const handleFileUpload = async (event: ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(event.target.files ?? [])
-    if (files.length === 0) return
+  const uploadFiles = async (files: File[], attachToChat: boolean) => {
+    if (!files.length || isRunning || uploadingRef.current) return
 
+    uploadingRef.current = true
+    setIsUploading(true)
+    clearError()
     try {
+      const unsupported = files.find((file) => !/\.(csv|xlsx|xls)$/i.test(file.name))
+      if (unsupported) throw new Error(`Unsupported file: ${unsupported.name}. Use CSV, XLSX, or XLS.`)
       const nextDatasets: WorkspaceDataset[] = []
 
       for (const file of files) {
@@ -760,14 +778,21 @@ export function AgentDashboard() {
         }
       }
 
-      if (nextDatasets.length === 0) return
+      if (nextDatasets.length === 0) {
+        setError("No data rows were found in those files.")
+        return
+      }
 
       setDatasets((prev) => {
         const keepSeed = prev.length === 1 && prev[0]?.id === initialDataset.id ? [] : prev
         return [...keepSeed, ...nextDatasets]
       })
+      if (attachToChat) {
+        setAttachedDatasetIds((previous) => uniqueDatasetIds([...previous, ...nextDatasets.map((dataset) => dataset.id)]))
+        setActiveDatasetId((previous) => previous && previous !== initialDataset.id ? previous : nextDatasets[0].id)
+        return
+      }
       setActiveDatasetId(nextDatasets[0].id)
-      setAttachedDatasetIds([])
       setWidgets([])
       setPivotTables([])
       setActiveDataTab("base")
@@ -782,8 +807,15 @@ export function AgentDashboard() {
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : "Upload failed")
     } finally {
-      event.target.value = ""
+      uploadingRef.current = false
+      setIsUploading(false)
     }
+  }
+
+  const handleFileUpload = (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.currentTarget.files ?? [])
+    event.currentTarget.value = ""
+    void uploadFiles(files, false)
   }
 
   const handleDownloadExcel = () => {
@@ -823,9 +855,6 @@ export function AgentDashboard() {
         return
       }
     }
-    const reportModel = modelName === "models/gemma-4-31b-it" || modelName === "minimaxai/minimax-m2.5"
-      ? modelName
-      : DEFAULT_THINKING_MODEL
     sessionStorage.setItem("report_target", JSON.stringify({
       datasetId: reportDataset.id,
       displayName: reportDataset.displayName,
@@ -833,15 +862,15 @@ export function AgentDashboard() {
       sheetName: reportDataset.sheetName,
       rowCount: reportDataset.rowCount,
       columnCount: reportDataset.columnCount,
-      model: reportModel,
     }))
     router.push("/report")
-  }, [activeDataset, modelName, router, setError])
+  }, [activeDataset, router, setError])
 
   const handleDeleteDataset = useCallback((datasetId: string) => {
     const nextDatasets = datasets.filter((dataset) => dataset.id !== datasetId)
 
     setDatasets(nextDatasets)
+    setAttachedDatasetIds((previous) => previous.filter((id) => id !== datasetId))
     if (activeDatasetId === datasetId) {
       setActiveDatasetId(nextDatasets[0]?.id ?? "")
       setActiveDataTab("base")
@@ -849,7 +878,6 @@ export function AgentDashboard() {
       setHighlightedColumns([])
       setGridSelection(EMPTY_GRID_SELECTION)
     }
-    setAttachedDatasetIds((prev) => prev.filter((id) => id !== datasetId))
     if (attachedSelectionContext?.dataset_id === datasetId) {
       setAttachedSelectionContext(null)
     }
@@ -938,16 +966,20 @@ export function AgentDashboard() {
   }, [])
 
   const handleRunAgent = useCallback(async () => {
-    if (isRunning || !prompt.trim()) return
+    if (isRunning || isUploading || !prompt.trim()) return
 
     clearError()
     setHighlightedChatMessageIndex(null)
 
     const outgoingPrompt = prompt.trim()
     const isHelpCommand = outgoingPrompt.toLowerCase() === "/help"
+    const isInventoryQuestion = asksForDatasetInventory(outgoingPrompt)
+    const previousRun = !draftScope.visible.length && asksForPreviousTable(outgoingPrompt)
+      ? chatMessages.findLast((message) => message.role === "assistant" && (message.code || message.table_links?.length))
+      : undefined
     const historyWithUser: ChatMessage[] = [
       ...chatMessages,
-      { role: "user", content: outgoingPrompt },
+      { role: "user", content: outgoingPrompt, datasetScope: draftScope.visible.map((dataset) => dataset.displayName) },
     ]
     const streamingPlaceholder: ChatMessage | null = thinkingMode
       ? {
@@ -962,28 +994,39 @@ export function AgentDashboard() {
     setChatMessages(streamingPlaceholder ? [...historyWithUser, streamingPlaceholder] : historyWithUser)
     setPrompt("")
 
-    if (isHelpCommand) {
+    if (previousRun) {
+      const tableLinks = previousRun.table_links?.filter((link) => pivotTables.some((table) => table.id === link.id)) ?? []
+      if (tableLinks.length) openPivotTable(tableLinks[0].id)
+      setChatMessages([
+        ...historyWithUser,
+        {
+          role: "assistant",
+          content: tableLinks.length ? "Here’s the result from the previous run." : "The previous run didn’t return a table.",
+          table_links: tableLinks,
+        },
+      ])
+      return
+    }
+
+    if (isHelpCommand || isInventoryQuestion) {
+      const visibleDatasets = datasets.filter((dataset) => dataset.id !== initialDataset.id)
+      const inventory = visibleDatasets.length
+        ? ["These datasets are open in your workspace:", ...visibleDatasets.map((dataset) =>
+            `- ${dataset.displayName} (${dataset.rowCount.toLocaleString()} rows, ${dataset.columnCount} columns)`
+          )].join("\n")
+        : "There are no uploaded datasets in this workspace yet."
       setChatMessages((prev) => [
         ...(thinkingMode ? prev.slice(0, -1) : prev),
         {
           role: "assistant",
-          content:
+          content: isInventoryQuestion ? inventory :
             "Try prompts like: `/filter movies after 2010`, `/modify rename Electronic to Electronics`, `/extract titles directed by Christopher Nolan`, `/visualize total revenue by category`, `/summarize this dataset`, or ask in plain English for edits, filters, summaries, and charts.",
         },
       ])
       return
     }
 
-    const mentionedIds = resolvePromptDatasetIds(outgoingPrompt, datasets)
-    const attachedIds = uniqueDatasetIds([
-      ...mentionedIds,
-      ...attachedDatasetIds,
-    ]).filter((datasetId) => datasets.some((dataset) => dataset.id === datasetId))
-    const requestDatasetIds = attachedIds.length > 0
-      ? attachedIds
-      : activeDataset && activeDataset.id !== initialDataset.id
-        ? [activeDataset.id]
-        : []
+    const requestDatasetIds = draftScope.ids
     const requestActiveDatasetId = requestDatasetIds[0] ?? null
     const requestRows = requestActiveDatasetId
       ? datasets.find((dataset) => dataset.id === requestActiveDatasetId)?.rows ?? rows
@@ -996,10 +1039,12 @@ export function AgentDashboard() {
       activeDatasetId: requestActiveDatasetId,
       selectedDatasetIds: requestDatasetIds.slice(1),
       datasetNames,
-      modelName,
+      modelName: requestModel,
       history: historyWithUser,
       thinkingMode,
-      selectionContext: attachedSelectionContext,
+      selectionContext: attachedSelectionContext?.dataset_id === (requestActiveDatasetId ?? activeDataset?.id)
+        ? attachedSelectionContext
+        : null,
       onThinkingTrace: (entry) => {
         setChatMessages((prev) => {
           if (!thinkingMode || prev.length === 0) return prev
@@ -1155,7 +1200,7 @@ export function AgentDashboard() {
       if (nextActiveDatasetId !== activeDatasetId) {
         setActiveDatasetId(nextActiveDatasetId)
       }
-      setActiveDataTab("base")
+      setActiveDataTab(data.responseTables[0]?.id ?? "base")
       setGridSelection(EMPTY_GRID_SELECTION)
       setAttachedSelectionContext(null)
       setUndoStack((prev) => [
@@ -1171,7 +1216,7 @@ export function AgentDashboard() {
 
     setHighlightedRows(new Set(data.highlightIndices))
     setHighlightedColumns(data.highlightedColumns)
-    addVisualizationWidget(data.visualizationPayload)
+    data.visualizations.forEach(addVisualizationWidget)
     if (thinkingMode) {
       setChatMessages((prev) => {
         if (prev.length === 0) return prev
@@ -1197,12 +1242,13 @@ export function AgentDashboard() {
         },
       ])
     }
-    setAttachedDatasetIds([])
     setAttachedSelectionContext(null)
-  }, [activeDataset, activeDatasetId, addVisualizationWidget, attachedDatasetIds, attachedSelectionContext, chatMessages, clearError, datasets, isRunning, modelName, prompt, rows, runAgent, selectedModelLabel, thinkingMode])
+    setAttachedDatasetIds([])
+  }, [activeDataset, activeDatasetId, addVisualizationWidget, attachedSelectionContext, chatMessages, clearError, datasets, draftScope, isRunning, isUploading, openPivotTable, pivotTables, prompt, requestModel, rows, runAgent, selectedModelLabel, thinkingMode])
 
   return (
     <div className="flex h-dvh flex-col overflow-hidden bg-background text-foreground font-sans antialiased">
+      {showPhotoImport && <PhotoImport onClose={() => setShowPhotoImport(false)} />}
       <div className="flex flex-1 min-h-0 overflow-hidden">
         <aside
           className={`shrink-0 flex flex-col border-r border-border bg-card/50 backdrop-blur-sm transition-all duration-200 overflow-x-hidden ${
@@ -1256,9 +1302,21 @@ export function AgentDashboard() {
                   type="file"
                   accept=".csv,.xlsx,.xls"
                   multiple
+                  disabled={isRunning || isUploading}
                   onChange={handleFileUpload}
                 />
               </label>
+
+              <button
+                type="button"
+                onClick={() => setShowPhotoImport(true)}
+                aria-label="Photo to Excel"
+                title="Convert paper records to Excel"
+                className={`group flex w-full items-center gap-2.5 rounded-lg border border-dashed border-border p-2.5 text-muted-foreground transition-colors hover:border-primary/50 hover:bg-accent/50 hover:text-foreground ${sidebarCollapsed ? "justify-center" : ""}`}
+              >
+                <ImagePlus aria-hidden="true" className="size-4 shrink-0" />
+                {!sidebarCollapsed && <span className="truncate text-xs font-medium">Photo to Excel</span>}
+              </button>
 
               <button
                 type="button"
@@ -1311,6 +1369,11 @@ export function AgentDashboard() {
                     return (
                       <div
                         key={dataset.id}
+                        draggable={dataset.id !== initialDataset.id && !isRunning}
+                        onDragStart={(event) => {
+                          event.dataTransfer.setData(DATASET_DRAG_TYPE, dataset.id)
+                          event.dataTransfer.effectAllowed = "copy"
+                        }}
                         onContextMenu={(event) => {
                           event.preventDefault()
                           event.stopPropagation()
@@ -1391,12 +1454,6 @@ export function AgentDashboard() {
 
           {!sidebarCollapsed && (
             <div className="shrink-0 border-t border-border p-3 space-y-3">
-              {isBypassMode && (
-                <div className="flex items-center gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-[10px] font-semibold text-amber-400">
-                  <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
-                  <span>Development Auth Bypass</span>
-                </div>
-              )}
               {userEmail && (
                 <div className="flex items-center gap-2 rounded-lg bg-secondary/50 p-2 text-xs text-muted-foreground">
                   <User className="size-3.5 shrink-0 text-primary" />
@@ -1406,10 +1463,15 @@ export function AgentDashboard() {
               <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider mb-1.5">
                 Model
               </div>
-              <div ref={modelMenuRef} className="relative">
+              {thinkingMode ? (
+                <div className="flex h-9 items-center rounded-lg border border-border/80 bg-secondary/85 px-3 text-xs font-medium text-foreground">
+                  <span className="truncate">{selectedModelLabel}</span>
+                </div>
+              ) : <div ref={modelMenuRef} className="relative">
                 <button
                   type="button"
                   onClick={() => setModelMenuOpen((prev) => !prev)}
+                  aria-expanded={modelMenuOpen}
                   className="flex h-9 w-full items-center justify-between rounded-lg border border-border/80 bg-secondary/85 px-3 text-xs font-medium text-foreground outline-none transition-[border-color,background-color,box-shadow,transform] duration-200 ease-[var(--menu-ease)] hover:border-primary/35 hover:bg-accent/70 focus-visible:ring-2 focus-visible:ring-ring/60"
                 >
                   <span className="truncate">{selectedModelLabel}</span>
@@ -1418,10 +1480,10 @@ export function AgentDashboard() {
 
                 <div
                   data-state={modelMenuOpen ? "open" : "closed"}
-                  className="menu-surface menu-popover absolute bottom-full left-0 right-0 mb-2 overflow-hidden rounded-xl p-1.5 z-50"
+                  className="menu-surface menu-popover absolute bottom-full left-0 right-0 z-50 mb-2 max-h-[min(24rem,65dvh)] overflow-x-hidden overflow-y-auto overscroll-contain rounded-xl p-1.5"
                   data-side="top"
                 >
-                  {availableModels.map((option) => {
+                  {MODEL_OPTIONS.map((option) => {
                     const isActive = option.value === modelName
                     return (
                       <button
@@ -1442,7 +1504,7 @@ export function AgentDashboard() {
                     )
                   })}
                 </div>
-              </div>
+              </div>}
 
               {totalTokens.total > 0 && (
                 <div className="flex items-center justify-between rounded-lg bg-secondary/40 px-2.5 py-1.5 text-[11px] text-muted-foreground">
@@ -1529,15 +1591,26 @@ export function AgentDashboard() {
           <ChatPanel
             width={chatWidth}
             chatMessages={chatMessages}
+            resultTables={pivotTables}
             highlightedMessageIndex={highlightedChatMessageIndex}
             pendingSelectionContext={pendingSelectionContext}
             attachedSelectionContext={attachedSelectionContext}
             prompt={prompt}
             isRunning={isRunning}
+            isUploading={isUploading}
             error={error}
             thinkingMode={thinkingMode}
             modelLabel={selectedModelLabel}
             datasets={datasets}
+            scopeDatasets={draftScope.visible}
+            detachableDatasetIds={draftScope.detachableIds}
+            onDropFiles={(files) => void uploadFiles(files, true)}
+            onAttachDataset={(id) => {
+              if (id !== initialDataset.id && datasets.some((dataset) => dataset.id === id)) {
+                setAttachedDatasetIds((previous) => uniqueDatasetIds([...previous, id]))
+              }
+            }}
+            onDetachDataset={(id) => setAttachedDatasetIds((previous) => previous.filter((item) => item !== id))}
             onPromptChange={(value) => setPrompt(value)}
             onSubmit={handleRunAgent}
             onCancel={cancelRun}

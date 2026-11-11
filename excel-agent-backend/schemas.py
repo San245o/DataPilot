@@ -1,11 +1,16 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 
 class ChatMessage(BaseModel):
     role: str
     content: str
+    code: str | None = None
+    sources: list[dict[str, str]] = Field(default_factory=list)
+    thinking_trace: list[dict[str, Any]] = Field(
+        default_factory=list, validation_alias=AliasChoices("thinking_trace", "thinkingTrace"),
+    )
 
 
 class AgentRequest(BaseModel):
@@ -58,6 +63,7 @@ class DatasetResult(BaseModel):
 
 
 class ThinkingTraceEntry(BaseModel):
+    call_id: str | None = None
     kind: Literal["thought", "action", "observation"]
     content: str
     tool_name: str | None = None
@@ -72,6 +78,7 @@ class AgentResponse(BaseModel):
     updated_datasets: list[DatasetResult] = Field(default_factory=list)
     created_datasets: list[DatasetResult] = Field(default_factory=list)
     visualization: dict[str, Any] | None = None
+    visualizations: list[dict[str, Any]] = Field(default_factory=list)
     query_output: str | None = None
     query_tables: list[QueryTable] = Field(default_factory=list)
     code: str
@@ -87,7 +94,7 @@ class AgentResponse(BaseModel):
 
 class ReportRequest(BaseModel):
     dataset_id: str
-    model: str
+    model: str | None = None
 
 
 class ReportMetric(BaseModel):

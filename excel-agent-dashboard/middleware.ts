@@ -1,63 +1,49 @@
-import { decryptSession, COOKIE_NAME } from "@/lib/auth/session";
-import { NextResponse, type NextRequest } from "next/server";
+import { SESSION_COOKIE } from "@/lib/api"
+import { NextResponse, type NextRequest } from "next/server"
 
-function isDevAuthBypassActive(): boolean {
-  return (
-    process.env.NODE_ENV !== "production" &&
-    process.env.DEV_AUTH_BYPASS === "true"
-  );
+const backendUrl = (process.env.BACKEND_URL ?? process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000").replace(/\/$/, "")
+
+function redirect(request: NextRequest, path: string) {
+  const url = new URL(path, request.url)
+  const host = request.headers.get("host")
+  // Next can normalize request.url to localhost even when the browser used 127.0.0.1.
+  if (host && /^(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?$/i.test(host)) {
+    url.host = host
+  }
+  return NextResponse.redirect(url)
 }
 
 export async function middleware(request: NextRequest) {
-  const pathname = request.nextUrl.pathname;
+  const { pathname, search } = request.nextUrl
+  const token = request.cookies.get(SESSION_COOKIE)?.value
+  const isLogin = pathname === "/login"
+  let signedIn = false
 
-  const isProtectedRoute =
-    pathname.startsWith("/dashboard") ||
-    pathname.startsWith("/report") ||
-    pathname.startsWith("/chart-viewer") ||
-    pathname.startsWith("/home") ||
-    pathname.startsWith("/history") ||
-    pathname.startsWith("/tutorials");
-
-  const isAuthRoute =
-    pathname.startsWith("/login") ||
-    pathname.startsWith("/register") ||
-    pathname.startsWith("/signup");
-
-  // When development bypass is active (NODE_ENV !== "production" && DEV_AUTH_BYPASS === "true")
-  if (isDevAuthBypassActive()) {
-    return NextResponse.next();
+  if (token && /^[A-Za-z0-9_-]{43}$/.test(token)) {
+    try {
+      const response = await fetch(`${backendUrl}/auth/session`, {
+        headers: { Cookie: `${SESSION_COOKIE}=${token}` },
+        cache: "no-store",
+        signal: AbortSignal.timeout(3000),
+      })
+      signedIn = response.ok
+    } catch {
+      // An unavailable backend cannot validate the session.
+    }
   }
 
-  // Normal Entra authentication route protection
-  const sessionToken = request.cookies.get(COOKIE_NAME)?.value;
-  const session = sessionToken ? await decryptSession(sessionToken) : null;
-
-  if (isProtectedRoute && !session) {
-    const redirectUrl = request.nextUrl.clone();
-    redirectUrl.pathname = "/login";
-    redirectUrl.searchParams.set("redirectTo", pathname);
-    return NextResponse.redirect(redirectUrl);
+  if (!isLogin && !signedIn) {
+    const params = new URLSearchParams({ redirectTo: pathname + search })
+    return redirect(request, `/login?${params}`)
   }
 
-  if (isAuthRoute && session) {
-    const redirectUrl = request.nextUrl.clone();
-    redirectUrl.pathname = "/dashboard";
-    return NextResponse.redirect(redirectUrl);
+  if (isLogin && signedIn) {
+    return redirect(request, "/home")
   }
 
-  return NextResponse.next();
+  return NextResponse.next()
 }
 
 export const config = {
-  matcher: [
-    /*
-     * Match all request paths except for:
-     * - _next/static (static files)
-     * - _next/image (image optimization files)
-     * - favicon.ico (favicon file)
-     * - public files (e.g. demo-poster.jpg, datapilot-demo.mp4)
-     */
-    "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|mp4)$).*)",
-  ],
-};
+  matcher: ["/login", "/dashboard/:path*", "/report/:path*", "/chart-viewer/:path*", "/home/:path*", "/history/:path*", "/tutorials/:path*"],
+}

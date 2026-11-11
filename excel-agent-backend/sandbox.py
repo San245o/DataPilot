@@ -192,6 +192,31 @@ class SandboxViolation(Exception):
     pass
 
 
+class _DatasetFrames(dict[str, pd.DataFrame]):
+    """Iterate each dataset once while supporting lookup by ID or display name."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._aliases: dict[str, str] = {}
+
+    def add(self, dataset_id: str, name: str, frame: pd.DataFrame) -> None:
+        frame.attrs["name"] = name
+        self[dataset_id] = frame
+        self._aliases[name] = dataset_id
+
+    def __missing__(self, key: str) -> pd.DataFrame:
+        return super().__getitem__(self._aliases[key])
+
+    def __contains__(self, key: object) -> bool:
+        return super().__contains__(key) or key in self._aliases
+
+    def get(self, key: str, default: Any = None) -> Any:
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+
 @dataclass
 class SandboxResult:
     rows: list[dict[str, Any]]
@@ -202,6 +227,8 @@ class SandboxResult:
     highlight_indices: list[int] = field(default_factory=list)
     highlighted_columns: list[str] = field(default_factory=list)
     visualizations: list[dict[str, Any]] = field(default_factory=list)
+    separate_result: bool = False
+    assistant_reply: str | None = None
 
 
 def heal_code_escaping_glitches(code: str) -> str:
@@ -607,7 +634,7 @@ def _execute_in_sandbox(
         "Exception": builtins.Exception,
     }
 
-    dfs: dict[str, pd.DataFrame] = {}
+    dfs = _DatasetFrames()
     for dataset_id, dataset in (datasets or {}).items():
         dataset_rows = dataset.get("rows") or []
         dataset_name = str(dataset.get("name") or dataset_id)
@@ -616,13 +643,11 @@ def _execute_in_sandbox(
         for col in dataset_df.columns:
             if pd.api.types.is_object_dtype(dataset_df[col]):
                 dataset_df[col] = dataset_df[col].map(lambda v: v.strip() if isinstance(v, str) else v)
-        dfs[dataset_id] = dataset_df.copy()
-        dfs[dataset_name] = dataset_df.copy()
+        dfs.add(dataset_id, dataset_name, dataset_df)
 
     if active_dataset_id:
         active_name = str((datasets or {}).get(active_dataset_id, {}).get("name") or active_dataset_id)
-        dfs[active_dataset_id] = df.copy()
-        dfs[active_name] = df.copy()
+        dfs.add(active_dataset_id, active_name, df.copy())
 
     env.update({
         "__builtins__": safe_builtins,
@@ -667,6 +692,11 @@ def _execute_in_sandbox(
     result_df = env.get("result_df", env.get("df"))
     if not isinstance(result_df, pd.DataFrame):
         raise SandboxViolation("result_df must be a pandas DataFrame")
+    working_df = env.get("df")
+    separate_result = (
+        isinstance(working_df, pd.DataFrame) and result_df is not working_df and working_df.equals(original_df)
+    )
+    assistant_reply = env.get("assistant_reply")
 
     # Auto-detect mutation: compare shape and content with original
     if not mutation_flag[0]:
@@ -746,6 +776,8 @@ def _execute_in_sandbox(
         "visualizations": visualizations,
         "query_output": query_output,
         "query_table_rows": query_table_rows,
+        "separate_result": separate_result,
+        "assistant_reply": assistant_reply.strip() if isinstance(assistant_reply, str) else None,
         "mutation": mutation_flag[0],
         "highlight_indices": highlight_idx,
         "highlighted_columns": highlighted_columns,
@@ -803,4 +835,6 @@ def run_sandboxed(
         highlight_indices=result_container.get("highlight_indices", []),
         highlighted_columns=result_container.get("highlighted_columns", []),
         visualizations=result_container.get("visualizations", []),
+        separate_result=result_container.get("separate_result", False),
+        assistant_reply=result_container.get("assistant_reply"),
     )

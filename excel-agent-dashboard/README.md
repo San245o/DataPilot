@@ -17,11 +17,9 @@ pnpm dev
 
 Frontend URL: http://localhost:3000
 
-By default, the dashboard proxies backend calls through Next.js at `/api/backend/*` to `http://127.0.0.1:8000`.
-Optional overrides:
+On the sign-in page, choose `analyst@example.test` or `reviewer@example.test`. Both use the password `datapilot-test`. The local backend issues an eight-hour session, which also ends on sign-out or when the backend restarts.
 
-- `BACKEND_URL` (server-side rewrite destination)
-- `NEXT_PUBLIC_API_BASE_URL` (client-side direct URL, if you do not want proxy)
+The browser connects directly to FastAPI on port 8000. Use the same loopback hostname for both services so the session cookie works across ports. To change the API port, set `NEXT_PUBLIC_API_BASE_URL` for the frontend to its direct backend URL. Set `FRONTEND_PORT` for the backend if the dashboard uses a port other than 3000.
 
 ## Run Backend (FastAPI)
 

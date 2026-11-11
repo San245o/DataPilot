@@ -79,6 +79,7 @@ function TypewriterText({ words }: { words: string[] }) {
 
   useEffect(() => {
     const currentWord = words[wordIndex % words.length]
+    if (!currentWord) return
     let timeout: NodeJS.Timeout
 
     if (!isDeleting) {
@@ -97,8 +98,10 @@ function TypewriterText({ words }: { words: string[] }) {
           setText(currentWord.slice(0, text.length - 1))
         }, 35)
       } else {
-        setIsDeleting(false)
-        setWordIndex((prev) => prev + 1)
+        timeout = setTimeout(() => {
+          setIsDeleting(false)
+          setWordIndex((prev) => prev + 1)
+        }, 35)
       }
     }
 

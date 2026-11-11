@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useId, useState } from "react";
 import type { ChangeEvent, ComponentType } from "react";
 import { Eye, EyeOff } from "lucide-react";
 
@@ -15,6 +15,7 @@ type AuthFieldProps = {
   error?: string | undefined;
   isPassword?: boolean;
   maxLength?: number | undefined;
+  required?: boolean;
 };
 
 export function AuthField({
@@ -28,7 +29,9 @@ export function AuthField({
   error,
   isPassword = false,
   maxLength,
+  required,
 }: AuthFieldProps) {
+  const inputId = useId();
   const [showPassword, setShowPassword] = useState(false);
 
   const inputType = isPassword
@@ -39,7 +42,7 @@ export function AuthField({
 
   return (
     <div className="space-y-1.5">
-      <label className="block text-xs font-medium text-slate-300">
+      <label htmlFor={inputId} className="block text-xs font-medium text-slate-300">
         {label}
       </label>
 
@@ -50,7 +53,9 @@ export function AuthField({
         />
 
         <input
+          id={inputId}
           type={inputType}
+          required={required}
           autoComplete={autoComplete}
           placeholder={placeholder}
           value={value}

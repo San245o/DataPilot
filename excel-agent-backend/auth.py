@@ -1,147 +1,93 @@
 from __future__ import annotations
 
 import os
-import logging
-from typing import Any, Optional
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-import jwt
-from jwt import PyJWKClient, PyJWTError
+from secrets import compare_digest, token_urlsafe
+from threading import Lock
+from time import monotonic
+from typing import Annotated
 
-logger = logging.getLogger("excel-agent-backend.auth")
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from pydantic import BaseModel, Field
 
-security = HTTPBearer(auto_error=False)
+router = APIRouter(prefix="/auth")
+SESSION_COOKIE = "datapilot_test_session"
+SESSION_SECONDS = 8 * 60 * 60
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+frontend_port = os.environ.get("FRONTEND_PORT", "3000")
+FRONTEND_ORIGINS = [
+    f"http://{host}:{frontend_port}" for host in ("127.0.0.1", "localhost", "[::1]")
+]
+TEST_PASSWORD = b"datapilot-test"
+TEST_ACCOUNTS = {
+    "analyst@example.test": "Test Analyst",
+    "reviewer@example.test": "Test Reviewer",
+}
 
-ENTRA_TENANT_ID = os.getenv("ENTRA_TENANT_ID") or os.getenv("NEXT_PUBLIC_ENTRA_TENANT_ID")
-ENTRA_TENANT_SUBDOMAIN = os.getenv("ENTRA_TENANT_SUBDOMAIN") or os.getenv("NEXT_PUBLIC_ENTRA_TENANT_SUBDOMAIN", "datapilot.ciamlogin.com")
-ENTRA_API_CLIENT_ID = os.getenv("ENTRA_API_CLIENT_ID") or os.getenv("NEXT_PUBLIC_ENTRA_API_CLIENT_ID")
-ENTRA_REQUIRED_SCOPE = os.getenv("ENTRA_REQUIRED_SCOPE", "access_as_user")
 
-def _is_auth_enforced() -> bool:
-    explicit = os.getenv("REQUIRE_AUTH")
-    if explicit is not None:
-        return explicit.strip().lower() in ("true", "1", "yes")
-    tenant_id = os.getenv("ENTRA_TENANT_ID") or os.getenv("NEXT_PUBLIC_ENTRA_TENANT_ID")
-    return bool(tenant_id and not str(tenant_id).startswith("placeholder"))
+class LoginRequest(BaseModel):
+    email: str = Field(max_length=254)
+    password: str = Field(max_length=256)
 
-REQUIRE_AUTH = _is_auth_enforced()
 
-_jwks_clients: dict[str, PyJWKClient] = {}
+_sessions: dict[str, tuple[str, float]] = {}
+_session_lock = Lock()
 
-def get_jwks_url() -> str:
-    subdomain = ENTRA_TENANT_SUBDOMAIN if "." in ENTRA_TENANT_SUBDOMAIN else f"{ENTRA_TENANT_SUBDOMAIN}.ciamlogin.com"
-    if ENTRA_TENANT_ID:
-        return f"https://{subdomain}/{ENTRA_TENANT_ID}/discovery/v2.0/keys"
-    return f"https://{subdomain}/common/discovery/v2.0/keys"
 
-def get_jwks_client() -> PyJWKClient:
-    url = get_jwks_url()
-    if url not in _jwks_clients:
-        try:
-            _jwks_clients[url] = PyJWKClient(url)
-            logger.info(f"Initialized Microsoft Entra JWKS client at {url}")
-        except Exception as exc:
-            logger.warning(f"Failed to initialize PyJWKClient for {url}: {exc}")
-    return _jwks_clients[url]
+def _require_local_request(request: Request) -> None:
+    origin = request.headers.get("origin")
+    if (
+        request.client is None
+        or request.client.host not in LOOPBACK_HOSTS
+        or request.url.hostname not in LOOPBACK_HOSTS
+        or (origin is not None and origin not in FRONTEND_ORIGINS)
+    ):
+        raise HTTPException(status_code=403, detail="Test accounts are available on localhost only.")
 
-def verify_entra_api_token(token: str) -> dict[str, Any]:
-    """
-    Validates Microsoft Entra External ID v2 Access Token for DataPilot API.
-    Verifies signature via JWKS, expected issuer, expiration, API client ID GUID audience ('aud'),
-    delegated scope ('scp'), and extracts stable user identifier ('oid' or 'sub').
-    Rejects ID tokens or unauthorized scopes.
-    """
-    jwks_client = get_jwks_client()
 
-    subdomain = ENTRA_TENANT_SUBDOMAIN if "." in ENTRA_TENANT_SUBDOMAIN else f"{ENTRA_TENANT_SUBDOMAIN}.ciamlogin.com"
-    expected_issuers = []
-    if ENTRA_TENANT_ID:
-        expected_issuers.extend([
-            f"https://{subdomain}/{ENTRA_TENANT_ID}/v2.0",
-            f"https://login.microsoftonline.com/{ENTRA_TENANT_ID}/v2.0",
-            f"https://sts.windows.net/{ENTRA_TENANT_ID}/",
-        ])
+def get_current_user(request: Request) -> dict[str, str]:
+    _require_local_request(request)
+    token = request.cookies.get(SESSION_COOKIE, "")
+    with _session_lock:
+        session = _sessions.get(token)
+        if session is not None:
+            email, expires = session
+            if expires > monotonic():
+                return {"user_id": email, "email": email, "name": TEST_ACCOUNTS[email]}
+            _sessions.pop(token, None)
+    raise HTTPException(status_code=401, detail="Sign in with a DataPilot test account.")
 
-    expected_aud = ENTRA_API_CLIENT_ID if (ENTRA_API_CLIENT_ID and not ENTRA_API_CLIENT_ID.startswith("placeholder")) else None
 
-    try:
-        signing_key = jwks_client.get_signing_key_from_jwt(token)
-        payload = jwt.decode(
-            token,
-            signing_key.key,
-            algorithms=["RS256", "ES256"],
-            options={
-                "verify_signature": True,
-                "verify_exp": True,
-                "verify_aud": False, # Validated below explicitly against API Client ID GUID
-                "verify_iss": False, # Validated below against API issuer list
-            },
-        )
+@router.post("/login")
+def login(payload: LoginRequest, request: Request, response: Response) -> dict[str, bool]:
+    _require_local_request(request)
+    email = payload.email.strip().lower()
+    if email not in TEST_ACCOUNTS or not compare_digest(payload.password.encode(), TEST_PASSWORD):
+        raise HTTPException(status_code=401, detail="That test email or password is incorrect.")
 
-        # 1. Issuer Validation
-        token_iss = payload.get("iss", "")
-        if expected_issuers and not any(token_iss.startswith(iss) for iss in expected_issuers):
-            logger.warning(f"Token issuer mismatch: got '{token_iss}', expected one of {expected_issuers}")
-            raise PyJWTError(f"Invalid token issuer: {token_iss}")
+    token = token_urlsafe(32)
+    now = monotonic()
+    with _session_lock:
+        for old_token, (_, expires) in list(_sessions.items()):
+            if expires <= now:
+                del _sessions[old_token]
+        _sessions.pop(request.cookies.get(SESSION_COOKIE, ""), None)
+        _sessions[token] = (email, now + SESSION_SECONDS)
+    response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax", max_age=SESSION_SECONDS)
+    response.headers["Cache-Control"] = "no-store"
+    return {"ok": True}
 
-        # 2. Audience Validation (v2 Access Token aud MUST equal ENTRA_API_CLIENT_ID GUID)
-        token_aud = payload.get("aud")
-        if expected_aud:
-            aud_valid = (token_aud == expected_aud) or (isinstance(token_aud, list) and expected_aud in token_aud)
-            if not aud_valid:
-                logger.warning(f"Token audience mismatch: got '{token_aud}', expected API client ID GUID '{expected_aud}'")
-                raise PyJWTError(f"Invalid token audience. Expected API client ID GUID '{expected_aud}', got '{token_aud}'")
 
-        # 3. Delegated Scope ('scp') Validation
-        token_scopes = str(payload.get("scp", "")).split()
-        if ENTRA_REQUIRED_SCOPE and ENTRA_REQUIRED_SCOPE not in token_scopes and "access_as_user" not in token_scopes:
-            token_roles = payload.get("roles", [])
-            if not token_roles and token_scopes:
-                logger.warning(f"Token missing required scope '{ENTRA_REQUIRED_SCOPE}'. Scopes present: {token_scopes}")
-                raise PyJWTError(f"Insufficient scope. Required scope: '{ENTRA_REQUIRED_SCOPE}'")
+@router.get("/session")
+def read_session(user: Annotated[dict[str, str], Depends(get_current_user)], response: Response) -> dict[str, dict[str, str]]:
+    response.headers["Cache-Control"] = "no-store"
+    return {"user": user}
 
-        # 4. Extract Stable User Identifier (oid in Entra ID, sub as fallback)
-        stable_user_id = payload.get("oid") or payload.get("sub")
-        if not stable_user_id:
-            raise ValueError("Token missing stable user identifier ('oid' or 'sub')")
 
-        email = payload.get("email") or payload.get("preferred_username") or payload.get("upn")
-
-        return {
-            "user_id": str(stable_user_id),
-            "email": email,
-            "authenticated": True,
-            "claims": payload,
-        }
-    except PyJWTError as err:
-        logger.warning(f"Entra API access token verification failed: {err}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid or expired DataPilot API token: {str(err)}",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    except Exception as err:
-        logger.warning(f"Unexpected token verification error: {err}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Authentication error: {str(err)}",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> dict[str, Any]:
-    if not credentials or not credentials.credentials:
-        if _is_auth_enforced():
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Authentication required. Please provide a valid Bearer token for DataPilot API.",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        return {"user_id": "dev-local-user", "email": "dev@datapilot.local", "authenticated": False}
-
-    token = credentials.credentials
-    # Dev token handling for local test mode when Entra keys are not fully configured
-    if token.startswith("dev_token_") or token.startswith("google_token_"):
-        dev_user_id = token.replace("dev_token_", "").replace("google_token_", "")
-        return {"user_id": dev_user_id, "email": "dev@datapilot.local", "authenticated": True}
-
-    return verify_entra_api_token(token)
+@router.post("/logout")
+def logout(request: Request, response: Response) -> dict[str, bool]:
+    _require_local_request(request)
+    with _session_lock:
+        _sessions.pop(request.cookies.get(SESSION_COOKIE, ""), None)
+    response.delete_cookie(SESSION_COOKIE, httponly=True, samesite="lax")
+    response.headers["Cache-Control"] = "no-store"
+    return {"ok": True}

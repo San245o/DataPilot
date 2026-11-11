@@ -93,7 +93,9 @@ tail -f server.log
 ## Models
 
 The application uses Google Gemini models:
-- `gemini-3-flash-preview` (default) - Fast and capable
+- `gemini-3.8-flash` - Most intelligent Flash model for advanced analytics, complex engineering, and code generation
+- `gemini-3.5-flash-lite` - Low-latency, cost-efficient model for quick analysis, high-throughput extraction, and thinking tasks
+- `gemini-3-flash-preview` - Fast and capable
 - `gemini-3.1-flash-lite-preview` - Lighter, faster responses
 
 ## Tech Stack

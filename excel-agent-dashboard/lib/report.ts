@@ -1,5 +1,19 @@
 import type { ThinkingTraceEntry, VisualizationPayload } from "@/components/dashboard/dashboard-shared"
 
+export type ReportPlan = {
+  model: string
+  focus: string
+  charts: Array<{ id: number; type: string; question: string; method: string; fields: string[] }>
+}
+
+export type ReportChart = {
+  id: number
+  kind: string
+  title: string
+  figure: VisualizationPayload
+  interpretation: string
+}
+
 export type AutoReport = {
   generation_mode?: "model" | "fallback"
   dataset: { id: string; name: string; rows: number; columns: number }
@@ -7,7 +21,7 @@ export type AutoReport = {
   metrics: Array<{ label: string; value: string }>
   sections: Array<{ title: string; content: string; items?: Array<{ headline: string; content: string }> }>
   tables: Array<{ title: string; columns: string[]; rows: Array<Record<string, unknown>>; interpretation?: string }>
-  charts: Array<{ title: string; figure: VisualizationPayload; interpretation: string }>
+  charts: ReportChart[]
   conclusion: string
   recommendations: string[]
   sources: Array<{ title: string; url: string }>
@@ -21,5 +35,4 @@ export type ReportTarget = {
   sheetName?: string
   rowCount: number
   columnCount: number
-  model: string
 }

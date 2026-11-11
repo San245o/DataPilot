@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useRef, useState } from "react"
+import { apiFetch, getApiBaseUrl } from "@/lib/api"
 import {
   expandSlashPrompt,
   normalizeRows,
@@ -16,8 +17,6 @@ import {
   type VisualizationPayload,
   type WorkspaceDataset,
 } from "@/components/dashboard/dashboard-shared"
-
-export const API_BASE_URL = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api/backend").replace(/\/$/, "")
 
 type RunAgentInput = {
   prompt: string
@@ -38,7 +37,7 @@ type AgentRunSuccessData = {
   highlightIndices: number[]
   highlightedColumns: HighlightedColumn[]
   mutation: boolean
-  visualizationPayload: VisualizationPayload | null
+  visualizations: VisualizationPayload[]
   updatedDatasets: WorkspaceDataset[]
   createdDatasets: WorkspaceDataset[]
   assistantMessage: ChatMessage
@@ -98,7 +97,9 @@ function normalizeFinalPayload(finalPayload: AgentExecuteResponse): AgentRunSucc
     highlightIndices: Array.isArray(finalPayload.highlight_indices) ? finalPayload.highlight_indices : [],
     highlightedColumns: Array.isArray(finalPayload.highlighted_columns) ? finalPayload.highlighted_columns : [],
     mutation: Boolean(finalPayload.mutation),
-    visualizationPayload: finalPayload.visualization ?? null,
+    visualizations: finalPayload.visualizations?.length
+      ? finalPayload.visualizations
+      : finalPayload.visualization ? [finalPayload.visualization] : [],
     updatedDatasets: normalizeDatasetResults(finalPayload.updated_datasets ?? []),
     createdDatasets: normalizeDatasetResults(finalPayload.created_datasets ?? []),
     assistantMessage,
@@ -107,74 +108,41 @@ function normalizeFinalPayload(finalPayload: AgentExecuteResponse): AgentRunSucc
 }
 
 type ThinkingStreamEvent =
+  | { type: "heartbeat" }
   | { type: "trace"; entry: ThinkingTraceEntry }
   | { type: "final"; payload: AgentExecuteResponse }
   | { type: "error"; error: string }
 
-class ThinkingStreamBackendError extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = "ThinkingStreamBackendError"
-  }
-}
+async function readThinkingResult(
+  stream: ReadableStream<Uint8Array>,
+  onTrace?: (entry: ThinkingTraceEntry) => void,
+): Promise<AgentExecuteResponse> {
+  const reader = stream.getReader()
+  const decoder = new TextDecoder()
+  let pending = ""
 
-async function fetchThinkingFinalFallback({
-  expandedPrompt,
-  rows,
-  activeDatasetId,
-  selectedDatasetIds,
-  datasetNames,
-  modelName,
-  history,
-  selectionContext,
-  signal,
-}: {
-  expandedPrompt: string
-  rows: SheetRow[]
-  activeDatasetId?: string | null
-  selectedDatasetIds?: string[]
-  datasetNames?: Record<string, string>
-  modelName: string
-  history: ChatMessage[]
-  selectionContext?: DataSelectionContext | null
-  signal?: AbortSignal
-}): Promise<AgentExecuteResponse> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" }
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      pending += decoder.decode(value, { stream: !done })
+      const lines = pending.split("\n")
+      pending = done ? "" : lines.pop() ?? ""
 
-  const response = await fetch(`${API_BASE_URL}/agent/think`, {
-    method: "POST",
-    headers,
-    signal,
-    body: JSON.stringify({
-      prompt: expandedPrompt,
-      rows,
-      active_dataset_id: activeDatasetId,
-      selected_dataset_ids: selectedDatasetIds ?? [],
-      dataset_names: datasetNames ?? {},
-      model: modelName,
-      thinking_mode: true,
-      selection_context: selectionContext ?? null,
-      history: history.map((message) => ({
-        role: message.role,
-        content: message.role === "user" ? expandSlashPrompt(message.content) : message.content,
-      })),
-    }),
-  })
+      for (const line of lines) {
+        if (!line.trim()) continue
+        const event = JSON.parse(line) as ThinkingStreamEvent
+        if (event.type === "final" && event.payload) return event.payload
+        if (event.type === "error") throw new Error(event.error || "Thinking run failed.")
+        if (event.type === "trace") onTrace?.(event.entry)
+      }
 
-  if (!response.ok) {
-    const contentType = response.headers.get("content-type") || ""
-    if (contentType.includes("application/json")) {
-      const errorData = await response.json().catch(() => ({ detail: "Thinking fallback failed" }))
-      throw new Error(errorData.detail ?? "Thinking fallback failed")
+      if (done) throw new Error("The connection ended before the analysis result arrived.")
     }
-    throw new Error(`Thinking fallback failed: ${response.status} ${response.statusText}`)
+  } finally {
+    // A complete final event is enough even if the connection closes unexpectedly afterward.
+    void reader.cancel().catch(() => {})
+    reader.releaseLock()
   }
-
-  const payload = (await response.json()) as AgentExecuteResponse
-  if (!payload) {
-    throw new Error("Thinking fallback returned no result")
-  }
-  return payload
 }
 
 export function useAgentRunner() {
@@ -208,8 +176,8 @@ export function useAgentRunner() {
     }
 
     const endpoint = thinkingMode
-      ? `${API_BASE_URL}/agent/think/stream`
-      : `${API_BASE_URL}/agent/execute`
+      ? "/agent/think/stream"
+      : "/agent/execute"
     const expandedPrompt = expandSlashPrompt(prompt.trim())
     const abortController = new AbortController()
 
@@ -218,12 +186,10 @@ export function useAgentRunner() {
     setIsRunning(true)
     setError(null)
 
-    let lastAttemptedUrl = endpoint
-
     try {
       const headers: Record<string, string> = { "Content-Type": "application/json" }
 
-      const response = await fetch(endpoint, {
+      const response = await apiFetch(endpoint, {
         method: "POST",
         headers,
         signal: abortController.signal,
@@ -254,110 +220,9 @@ export function useAgentRunner() {
       }
 
       if (thinkingMode) {
-        const reader = response.body?.getReader()
-        if (!reader) {
-          throw new Error("Streaming response body was not available.")
-        }
-
-        const decoder = new TextDecoder()
-        let buffer = ""
-        let finalPayload: AgentExecuteResponse | null = null
-
-        const processLine = (line: string) => {
-          if (!line.trim()) return
-          const event = JSON.parse(line) as ThinkingStreamEvent
-          if (event.type === "trace") {
-            onThinkingTrace?.(event.entry)
-            return
-          }
-          if (event.type === "error") {
-            throw new ThinkingStreamBackendError(event.error || "Thinking stream failed")
-          }
-          if (event.type === "final") {
-            finalPayload = event.payload
-          }
-        }
-
-        try {
-          while (true) {
-            const { done, value } = await reader.read()
-            if (done) break
-
-            buffer += decoder.decode(value, { stream: true })
-            const lines = buffer.split("\n")
-            buffer = lines.pop() ?? ""
-
-            for (const line of lines) {
-              processLine(line)
-            }
-          }
-        } catch (streamError) {
-          if (abortController.signal.aborted || (streamError instanceof Error && streamError.name === "AbortError")) {
-            throw streamError
-          }
-
-          if (streamError instanceof ThinkingStreamBackendError) {
-            throw streamError
-          }
-
-          onThinkingTrace?.({
-            kind: "observation",
-            content: "The live stream was interrupted, so I'm finishing the thinking run in the background.",
-            status: "error",
-          })
-
-          lastAttemptedUrl = `${API_BASE_URL}/agent/think`
-          const fallbackPayload = await fetchThinkingFinalFallback({
-            expandedPrompt,
-            rows,
-            activeDatasetId,
-            selectedDatasetIds,
-            datasetNames,
-            modelName,
-            history,
-            selectionContext,
-            signal: abortController.signal,
-          })
-          return {
-            ok: true,
-            data: normalizeFinalPayload(fallbackPayload),
-          }
-        }
-
-        buffer += decoder.decode()
-        if (buffer.trim()) {
-          processLine(buffer)
-        }
-
-        if (!finalPayload) {
-          onThinkingTrace?.({
-            kind: "observation",
-            content: "The live stream ended before the final answer arrived, so I'm finishing it in the background.",
-            status: "error",
-          })
-
-          lastAttemptedUrl = `${API_BASE_URL}/agent/think`
-          const fallbackPayload = await fetchThinkingFinalFallback({
-            expandedPrompt,
-            rows,
-            activeDatasetId,
-            selectedDatasetIds,
-            datasetNames,
-            modelName,
-            history,
-            selectionContext,
-            signal: abortController.signal,
-          })
-          return {
-            ok: true,
-            data: normalizeFinalPayload(fallbackPayload),
-          }
-        }
-
-        return {
-          ok: true,
-          data: normalizeFinalPayload(finalPayload),
-        }
+        if (!response.body) throw new Error("The analysis stream was unavailable.")
+        const finalPayload = await readThinkingResult(response.body, onThinkingTrace)
+        return { ok: true, data: normalizeFinalPayload(finalPayload) }
       }
 
       const finalPayload = (await response.json()) as AgentExecuteResponse
@@ -379,7 +244,7 @@ export function useAgentRunner() {
 
       const message =
         agentError instanceof TypeError && agentError.message.includes("fetch")
-          ? `Failed to reach backend at ${lastAttemptedUrl}. If you are running the dashboard in a remote/devcontainer setup, use the default /api/backend proxy or set NEXT_PUBLIC_API_BASE_URL to a reachable URL.`
+          ? `Could not reach DataPilot at ${getApiBaseUrl()}. Check that the local backend is running.`
           : agentError instanceof Error
             ? agentError.message
             : "Unknown agent error"

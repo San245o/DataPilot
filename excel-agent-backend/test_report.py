@@ -1,137 +1,184 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
+import threading
 import time
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
 
-from report import (
-    FORBIDDEN_REPORT_MARKERS,
-    _deterministic_chart,
-    _deterministic_charts,
-    _is_polished_text,
-    _run_analysis_bounded,
-    _safe_index,
-    _sanitize_for_report_json,
-    _synthesize_report,
-    generate_auto_report,
-)
+import pandas as pd
+
 from main import _cache_dataset, execute_auto_report_stream
+from report import REPORT_PLANNERS, _generate_chart, _plan_report, _report_context, _safe_index, _sanitize_for_report_json, _synthesize_report
 from schemas import ReportRequest
 from thinking import ToolExecution, run_thinking_agent
 
 
-GAPMINDER_ROWS = [
-    {"year": 2000, "country": "Kenya", "fertility": 4.9, "life_expectancy": 52.1, "pop_size": 3.7},
-    {"year": 2005, "country": "Kenya", "fertility": 4.6, "life_expectancy": 56.7, "pop_size": 4.1},
-    {"year": 2010, "country": "Kenya", "fertility": 4.3, "life_expectancy": 60.8, "pop_size": 4.9},
-    {"year": 2000, "country": "Japan", "fertility": 1.4, "life_expectancy": 81.2, "pop_size": 3.1},
-    {"year": 2005, "country": "Japan", "fertility": 1.3, "life_expectancy": 82.1, "pop_size": 2.9},
-    {"year": 2010, "country": "Japan", "fertility": 1.4, "life_expectancy": 83.1, "pop_size": 3.0},
-    {"year": 2000, "country": "Brazil", "fertility": 2.4, "life_expectancy": 70.1, "pop_size": 5.9},
-    {"year": 2005, "country": "Brazil", "fertility": 2.1, "life_expectancy": 72.4, "pop_size": 6.3},
-    {"year": 2010, "country": "Brazil", "fertility": 1.9, "life_expectancy": 74.2, "pop_size": 6.8},
+ROWS = [
+    {"position": n + 1, "player": f"Player {n + 1}", "runs": n * 10, "strike_rate": 85 + n * 2, "team": "East" if n % 2 else "West"}
+    for n in range(20)
 ]
+TYPES = ["scatter", "heatmap", "treemap", "range", "ranking", "parallel coordinates", "distribution"]
 
 
-class AutoReportSynthesisTests(unittest.TestCase):
-    @staticmethod
-    def _stream_events(response) -> list[dict]:
-        async def collect() -> str:
-            chunks: list[str] = []
-            async for chunk in response.body_iterator:
-                chunks.append(chunk.decode() if isinstance(chunk, bytes) else chunk)
-            return "".join(chunks)
+def proposal(kind: str, **overrides) -> dict:
+    return {"type": kind, "question": f"What can the {kind} view show?", "fields": ["runs", "strike_rate"], "method": "Compare the calculated values.", **overrides}
 
-        return [json.loads(line) for line in asyncio.run(collect()).splitlines() if line.strip()]
 
-    def test_gapminder_tool_text_never_becomes_report_prose(self) -> None:
-        base_result = {
-            "assistant_reply": "Created the visualization.",
-            "query_output": "life_exp_avg: 56.533333333333333; dtype: float64",
-            "query_tables": [{"title": "raw", "rows": [{"life_exp_avg": 56.533333333333333}]}],
-            "visualization": None,
-            "sources": [],
+def completed_chart(item: dict) -> dict:
+    return {"chart": {
+        "id": item["id"], "kind": item["type"], "title": item["question"],
+        "figure": {"data": [{"type": "scatter", "x": [1, 2], "y": [3, 4]}]},
+        "interpretation": "The calculated values differ by 1.",
+    }}
+
+
+class AutoReportTests(unittest.TestCase):
+    def _stream(self):
+        dataset_id = _cache_dataset(ROWS, "Batting leaderboard", user_id="test-user")
+        return execute_auto_report_stream(
+            ReportRequest(dataset_id=dataset_id, model="models/gemma-4-31b-it"), current_user={"user_id": "test-user"},
+        ).body_iterator
+
+    def test_one_planner_request_and_leaderboard_position_excluded(self) -> None:
+        context = _report_context(pd.DataFrame(ROWS), "Batting leaderboard")
+        payload = {
+            "focus": "Compare the performance of the listed batters.",
+            "charts": [
+                proposal("scatter", fields=["position", "runs"]),
+                proposal("treemap", fields=["missing", "runs"]),
+                *[proposal(kind) for kind in TYPES],
+                proposal("ranking"),
+            ],
         }
-        chart_result = {**base_result, "query_tables": [], "visualization": {"data": [{"type": "scatter", "x": [4.9, 1.4], "y": [52.1, 81.2]}], "layout": {}}}
-        synthesis = {
-            "executive_summary": "This small dataset tracks fertility, life expectancy and population for three countries between 2000 and 2010.",
-            "sections": [{"title": "Key Findings", "content": "", "items": [{"headline": "Life expectancy improved", "content": "Kenya's life expectancy rose by 8.7 years over the observed decade."}]}],
-            "table_presentations": [{"index": 1, "title": "Country comparison", "column_labels": {"life_exp_avg": "Average life expectancy"}}],
-            "chart_presentations": [{"index": 0, "title": "Fertility and life expectancy", "interpretation": "Within this small sample, higher fertility is associated with lower life expectancy."}],
-            "conclusion": "Life expectancy rose over time while fertility generally declined across the observed countries.",
-            "recommendations": [],
-        }
-        chart_result["query_tables"] = base_result["query_tables"]
-        with patch("report._run_analysis", return_value=chart_result), patch("report._synthesize_report", return_value=synthesis):
-            generated = generate_auto_report(dataset_id="gap", dataset_name="gapminder-lite.xlsx / Data", rows=GAPMINDER_ROWS, model_name="test")
+        response = {"candidates": [{"finishReason": "STOP", "content": {"parts": [{"text": json.dumps(payload)}]}}]}
+        with patch.dict("os.environ", {"GEMINI_API_KEY": "test-key"}), patch(
+            "report.urlopen", return_value=io.BytesIO(json.dumps(response).encode()),
+        ) as request:
+            plan = _plan_report(context, "gemini-3.8-flash", 12)
+        request.assert_called_once()
+        call = request.call_args.args[0]
+        self.assertIn("/gemini-3.8-flash:generateContent", call.full_url)
+        self.assertEqual(request.call_args.kwargs["timeout"], 12)
+        body = json.loads(call.data)
+        self.assertEqual(body["generationConfig"]["thinkingConfig"]["thinkingLevel"], "LOW")
+        model_input = json.loads(body["contents"][0]["parts"][0]["text"])
+        self.assertEqual(len(model_input["sample"]), 5)
+        self.assertEqual(model_input["rows"], 20)
+        self.assertTrue(model_input["columns"]["position"]["identifier_or_rank"])
+        self.assertEqual(plan["model"], "Gemini 3.8 Flash")
+        self.assertEqual([item["type"] for item in plan["charts"]], TYPES)
 
-        visible = json.dumps({
-            "summary": generated["summary"], "sections": generated["sections"], "tables": generated["tables"],
-            "charts": [{"title": chart["title"], "interpretation": chart["interpretation"]} for chart in generated["charts"]],
-            "conclusion": generated["conclusion"],
-        }).lower()
-        for marker in FORBIDDEN_REPORT_MARKERS:
-            self.assertNotIn(marker, visible)
-        self.assertEqual(generated["tables"][0]["columns"], ["Average life expectancy"])
-        self.assertIn("associated", generated["charts"][0]["interpretation"])
+    def test_plan_precedes_seven_individual_chart_events_and_summary(self) -> None:
+        context = _report_context(pd.DataFrame(ROWS), "Data")
+        with patch("report._request_report_plan", return_value={"focus": "Batting performance", "charts": [proposal(kind) for kind in TYPES]}):
+            plan = _plan_report(context, "gemini-3.8-flash", 12)
+        release = threading.Event()
 
-    def test_leak_guard_rejects_tool_status(self) -> None:
-        self.assertFalse(_is_polished_text("The tool created the requested visualization."))
-        self.assertFalse(_is_polished_text("execute_python"))
-        self.assertTrue(_is_polished_text("The dataset contains no duplicate records."))
+        def generate(item, rows, context, model, stop):
+            self.assertEqual(model, "gemini-3.5-flash-lite")
+            self.assertEqual(len(rows), 20)
+            if item["id"] != 1 and not release.wait(5):
+                raise TimeoutError("Expected first chart to arrive before the other views.")
+            return completed_chart(item)
 
-    def test_synthesis_failure_returns_substantive_deterministic_report(self) -> None:
-        raw_result = {"assistant_reply": "Created the visualization.", "query_output": "", "query_tables": [], "visualization": None, "sources": []}
-        with patch("report._run_analysis", return_value=raw_result), patch("report._synthesize_report", side_effect=TimeoutError("timed out")):
-            generated = generate_auto_report(dataset_id="gap", dataset_name="gapminder-lite.xlsx / Data", rows=GAPMINDER_ROWS, model_name="test")
-        findings = [item for section in generated["sections"] for item in section.get("items") or []]
-        self.assertGreaterEqual(len(findings), 3)
-        self.assertTrue(generated["tables"])
-        self.assertTrue(generated["charts"])
-        self.assertIn("small", json.dumps(findings).lower())
-        self.assertEqual(generated["generation_mode"], "fallback")
+        async def collect():
+            events = []
+            async for chunk in self._stream():
+                event = json.loads(chunk)
+                events.append(event)
+                if event["type"] == "chart":
+                    self.assertTrue(any(entry["type"] == "plan" for entry in events))
+                    release.set()
+            return events
 
-    def test_model_synthesis_emits_a_normal_final_event(self) -> None:
-        synthesis = {
-            "executive_summary": "The dataset covers three groups over an observed period.\n\nThe calculated evidence shows meaningful changes and comparisons.",
-            "sections": [{"title": "Key Findings", "content": "", "items": []}],
-            "table_presentations": [], "chart_presentations": [],
-            "conclusion": "The observed changes provide a supported descriptive summary of this small dataset.",
-            "recommendations": [],
-        }
-        dataset_id = _cache_dataset(GAPMINDER_ROWS, "gapminder-lite.xlsx / Data", user_id="test-user")
-        with patch("report._run_analysis", return_value={"assistant_reply": "Done.", "query_output": "", "query_tables": [], "visualization": None, "sources": []}), patch("report._synthesize_report", return_value=synthesis):
-            response = execute_auto_report_stream(
-                ReportRequest(dataset_id=dataset_id, model="models/gemma-4-31b-it"),
-                current_user={"user_id": "test-user"},
-            )
-            events = self._stream_events(response)
+        synthesis = {"executive_summary": "Computed summary.", "conclusion": "Computed conclusion."}
+        with patch("report._plan_report", return_value=plan) as planner, patch(
+            "report._generate_chart", side_effect=generate,
+        ), patch("report._synthesize_report", return_value=synthesis) as summarize:
+            events = asyncio.run(collect())
+        planner.assert_called_once()
+        public = [event for event in events if event["type"] != "trace"]
+        self.assertEqual([event["type"] for event in public], ["planner", "plan", *["chart"] * 7, "synthesizing", "final"])
+        self.assertEqual(public[2]["chart"]["id"], 1)
+        self.assertEqual(public[-1]["payload"]["charts"], [event["chart"] for event in public[2:9]])
+        self.assertEqual(summarize.call_args.kwargs["model_name"], "gemini-3.5-flash-lite")
+
+    def test_planner_exhausts_fallbacks_once_in_order_and_produces_no_charts(self) -> None:
+        async def collect():
+            return [json.loads(chunk) async for chunk in self._stream()]
+
+        with patch("report._request_report_plan", side_effect=TimeoutError) as request, patch("report._generate_chart") as generate:
+            events = asyncio.run(collect())
+        expected = [
+            "gemini-3.8-flash", "gemini-3.6-flash", "gemini-3-flash-preview",
+            "gemini-3.7-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite",
+        ]
+        self.assertEqual([call.args[1] for call in request.call_args_list], expected)
+        generate.assert_not_called()
+        public = [event for event in events if event["type"] != "trace"]
+        self.assertEqual([event["type"] for event in public], ["planner"] * len(expected) + ["error"])
+        self.assertIn("Gemini 3.8 Flash timed out. Trying Gemini 3.6 Flash.", public[1]["message"])
+        self.assertIn("Gemini 3.5 Flash-Lite timed out", public[-1]["error"])
+
+    def test_planner_skips_unavailable_or_invalid_models_and_stops_on_success(self) -> None:
+        async def collect():
+            return [json.loads(chunk) async for chunk in self._stream()]
+
+        responses = [
+            HTTPError("https://example.test", 503, "Unavailable", {}, None),
+            {"focus": "Invalid fields", "charts": [proposal("scatter", fields=["not a column"])]},
+            {"focus": "Batting performance", "charts": [proposal("scatter")]},
+        ]
+        synthesis = {"executive_summary": "Computed summary.", "conclusion": "Computed conclusion."}
+        with patch("report._request_report_plan", side_effect=responses) as request, patch(
+            "report._generate_chart", side_effect=lambda item, *_args: completed_chart(item),
+        ), patch("report._synthesize_report", return_value=synthesis):
+            events = asyncio.run(collect())
+
+        self.assertEqual([call.args[1] for call in request.call_args_list], list(REPORT_PLANNERS)[:3])
+        self.assertEqual([call.args[2] for call in request.call_args_list], [12, 15, 15])
+        planner_events = [event["message"] for event in events if event["type"] == "planner"]
+        self.assertIn("returned HTTP 503", planner_events[1])
+        self.assertIn("returned an unusable plan", planner_events[2])
+        plan = next(event["plan"] for event in events if event["type"] == "plan")
+        self.assertEqual(plan["model"], "Gemini 3 Flash Preview")
         self.assertEqual(events[-1]["type"], "final")
-        self.assertFalse(any(event["type"] == "error" for event in events))
-        self.assertEqual(events[-1]["payload"]["generation_mode"], "model")
 
-    def test_synthesis_timeout_emits_fallback_as_a_normal_final_event(self) -> None:
-        dataset_id = _cache_dataset(GAPMINDER_ROWS, "gapminder-lite.xlsx / Data", user_id="test-user")
-        with patch("report._run_analysis", return_value={"assistant_reply": "Done.", "query_output": "", "query_tables": [], "visualization": None, "sources": []}), patch("report._synthesize_report", side_effect=TimeoutError("timed out")):
-            response = execute_auto_report_stream(
-                ReportRequest(dataset_id=dataset_id, model="models/gemma-4-31b-it"),
-                current_user={"user_id": "test-user"},
-            )
-            events = self._stream_events(response)
-        self.assertEqual(events[-1]["type"], "final")
-        self.assertFalse(any(event["type"] == "error" for event in events))
+    def test_incomplete_charts_are_marked_and_existing_charts_survive_summary_failure(self) -> None:
+        plan = {"model": "Gemini 3.8 Flash", "focus": "Batting performance", "charts": [proposal(kind, id=i) for i, kind in enumerate(TYPES[:2], 1)]}
+
+        def generate(item, *_args):
+            return {"reason": "The grouping does not have enough records."} if item["id"] == 2 else completed_chart(item)
+
+        async def collect():
+            return [json.loads(chunk) async for chunk in self._stream()]
+
+        with patch("report._plan_report", return_value=plan), patch(
+            "report._generate_chart", side_effect=generate,
+        ), patch("report._synthesize_report", side_effect=TimeoutError):
+            events = asyncio.run(collect())
+        skipped = [event for event in events if event["type"] == "chart_skipped"]
+        self.assertEqual([event["id"] for event in skipped], [2])
         self.assertEqual(events[-1]["payload"]["generation_mode"], "fallback")
-        self.assertGreaterEqual(sum(len(section.get("items") or []) for section in events[-1]["payload"]["sections"]), 3)
+        self.assertEqual(events[-1]["payload"]["charts"], [completed_chart(plan["charts"][0])["chart"]])
 
-    def test_thinking_analysis_has_an_orchestration_timeout(self) -> None:
-        with patch("report.ANALYSIS_TIMEOUT_SECONDS", 0.01), patch("report._run_analysis", side_effect=lambda **_: time.sleep(0.1)):
-            with self.assertRaisesRegex(TimeoutError, "deterministic evidence"):
-                _run_analysis_bounded(
-                    prompt="analyze", rows=GAPMINDER_ROWS, dataset_id="gap",
-                    dataset_name="gapminder-lite.xlsx / Data", model_name="test", emit=None,
-                )
+    def test_chart_agent_retries_wrong_plot_and_executes_against_full_dataset(self) -> None:
+        context = _report_context(pd.DataFrame(ROWS), "Data")
+        wrong = "fig = px.bar(df, x='team', y='runs'); assistant_reply = 'A chart caption.'; result_df = df"
+        correct = (
+            "fig = px.scatter(df, x='runs', y='strike_rate', title='Scoring volume and pace')\n"
+            "assistant_reply = f'{len(df)} batters are included.'\nresult_df = df"
+        )
+        with patch("report.invoke_model_json", side_effect=[({"code": wrong}, {}, ""), ({"code": correct}, {}, "")]) as invoke:
+            result = _generate_chart(proposal("scatter", id=1), ROWS, context, "gemini-3.5-flash-lite", threading.Event())
+        self.assertEqual(invoke.call_count, 2)
+        self.assertIn("requested chart type", invoke.call_args.kwargs["user_message"])
+        self.assertEqual(result["chart"]["title"], "Scoring volume and pace")
+        self.assertEqual(result["chart"]["interpretation"], "20 batters are included.")
 
     def test_synthesis_emits_safe_heartbeats_until_its_deadline(self) -> None:
         events: list[dict] = []
@@ -147,7 +194,7 @@ class AutoReportSynthesisTests(unittest.TestCase):
         def execute_schema(*_args, **_kwargs):
             self.assertEqual(events[-1]["kind"], "action")
             return ToolExecution(
-                rows=GAPMINDER_ROWS, visualization=None, query_output=None, query_table_rows=None,
+                rows=ROWS, visualization=None, query_output=None, query_table_rows=None,
                 mutation=False, highlight_indices=[], highlighted_columns=[], observation="Schema checked.",
                 raw_observation="5 columns", code="inspect_schema(sample_rows=2)",
             )
@@ -159,7 +206,7 @@ class AutoReportSynthesisTests(unittest.TestCase):
         }, {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2})
         with patch("thinking._invoke_planner_step", return_value=plan), patch("thinking._execute_schema_tool", side_effect=execute_schema):
             run_thinking_agent(
-                prompt="inspect", rows=GAPMINDER_ROWS, model_name="test", history=[],
+                prompt="inspect", rows=ROWS, history=[],
                 event_callback=events.append,
             )
 
@@ -190,63 +237,6 @@ class AutoReportSynthesisTests(unittest.TestCase):
         encoded = json.dumps(sanitized, allow_nan=False)
         self.assertNotIn("NaN", encoded)
         self.assertNotIn("Infinity", encoded)
-
-    def test_deterministic_chart_handles_mixed_types_and_nans(self) -> None:
-        import pandas as pd
-        rows = [
-            {"year": 2000, "region": "North", "sales": 100.0},
-            {"year": "2001", "region": "North", "sales": float("nan")},
-            {"year": 2002, "region": "North", "sales": 150.0},
-            {"year": "2000", "region": "South", "sales": 80.0},
-            {"year": 2001, "region": "South", "sales": 90.0},
-            {"year": 2002, "region": "South", "sales": 110.0},
-        ]
-        chart = _deterministic_chart(pd.DataFrame(rows))
-        self.assertIsNotNone(chart)
-        figure = chart["figure"]
-        self.assertEqual(len(figure["data"]), 2)
-        # Verify JSON serialization without allow_nan=True succeeds
-        encoded = json.dumps(figure, allow_nan=False)
-        self.assertNotIn("NaN", encoded)
-
-    def test_string_indices_in_presentations_preserve_tables_and_charts(self) -> None:
-        base_result = {
-            "assistant_reply": "Calculated results.",
-            "query_output": "val: 42",
-            "query_tables": [{"title": "Country stats", "rows": [{"Country": "Kenya", "Value": 42}]}],
-            "visualization": {"data": [{"type": "scatter", "x": [1, 2], "y": [3, 4]}], "layout": {}},
-            "sources": [],
-        }
-        # String indices "0"
-        synthesis = {
-            "executive_summary": "Summary of observations across countries.",
-            "sections": [],
-            "table_presentations": [{"index": "1", "title": "Polished stats"}],
-            "chart_presentations": [{"index": "0", "title": "Polished chart", "interpretation": "Observed trend."}],
-            "conclusion": "Conclusion on the data.",
-            "recommendations": [],
-        }
-        with patch("report._run_analysis", return_value=base_result), patch("report._synthesize_report", return_value=synthesis):
-            generated = generate_auto_report(dataset_id="test", dataset_name="Data", rows=GAPMINDER_ROWS, model_name="test")
-
-        self.assertEqual(len(generated["tables"]), 1)
-        self.assertEqual(generated["tables"][0]["title"], "Polished stats")
-        self.assertEqual(len(generated["charts"]), 1)
-        self.assertEqual(generated["charts"][0]["title"], "Polished chart")
-
-    def test_deterministic_charts_generates_multiple_distinct_visualizations(self) -> None:
-        import pandas as pd
-        charts = _deterministic_charts(pd.DataFrame(GAPMINDER_ROWS))
-        self.assertGreaterEqual(len(charts), 3)
-        chart_types = [chart["figure"]["data"][0]["type"] for chart in charts]
-        # Should contain scatter (trend/points), bar, and histogram
-        self.assertIn("bar", chart_types)
-        self.assertIn("scatter", chart_types)
-        for chart in charts:
-            self.assertTrue(chart["title"])
-            encoded = json.dumps(chart["figure"], allow_nan=False)
-            self.assertNotIn("NaN", encoded)
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,71 +1,39 @@
-"use client";
+"use client"
 
-import type { UserSession } from "./session";
+import { apiFetch } from "@/lib/api"
+
+type UserSession = {
+  user_id: string
+  email: string
+  name: string
+}
 
 export async function getClientSession(): Promise<UserSession | null> {
   try {
-    const res = await fetch("/api/auth/session", { cache: "no-store" });
-    if (!res.ok) return null;
-    const data = await res.json();
-    return data.user || null;
+    const response = await apiFetch("/auth/session", { cache: "no-store" })
+    if (!response.ok) return null
+    const data = await response.json()
+    return data.user ?? null
   } catch {
-    return null;
+    return null
   }
 }
 
-export async function loginWithEmailPassword(email: string, password: string): Promise<{ ok: boolean; error?: string }> {
-  try {
-    const res = await fetch("/api/auth/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password }),
-    });
+export async function loginWithEmailPassword(email: string, password: string): Promise<void> {
+  const response = await apiFetch("/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  })
 
-    const data = await res.json();
-    if (!res.ok) {
-      return { ok: false, error: data.error || "Authentication failed." };
-    }
-
-    if (data.redirectUrl) {
-      window.location.href = data.redirectUrl;
-      return { ok: true };
-    }
-
-    return { ok: true };
-  } catch (err: unknown) {
-    return { ok: false, error: err instanceof Error ? err.message : "Network error." };
+  if (!response.ok) {
+    const data = await response.json().catch(() => null)
+    throw new Error(typeof data?.detail === "string" ? data.detail : "Sign-in failed.")
   }
-}
-
-export async function signUpWithEmailPassword(fullName: string, email: string, password: string): Promise<{ ok: boolean; error?: string; message?: string }> {
-  try {
-    const res = await fetch("/api/auth/signup", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fullName, email, password }),
-    });
-
-    const data = await res.json();
-    if (!res.ok) {
-      return { ok: false, error: data.error || "Registration failed." };
-    }
-
-    if (data.redirectUrl) {
-      window.location.href = data.redirectUrl;
-      return { ok: true };
-    }
-
-    return { ok: true, message: data.message };
-  } catch (err: unknown) {
-    return { ok: false, error: err instanceof Error ? err.message : "Network error." };
-  }
-}
-
-export async function loginWithGoogle(): Promise<void> {
-  window.location.href = "/api/auth/google";
 }
 
 export async function logoutUser(): Promise<void> {
-  await fetch("/api/auth/logout", { method: "POST" });
-  window.location.href = "/login";
+  const response = await apiFetch("/auth/logout", { method: "POST" })
+  if (!response.ok) throw new Error("Sign-out failed. Please try again.")
+  window.location.assign("/login")
 }

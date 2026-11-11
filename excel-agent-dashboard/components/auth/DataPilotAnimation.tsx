@@ -63,11 +63,18 @@ export function DataPilotAnimation({ className = "" }: { className?: string }) {
           <circle r="26" className="fill-none stroke-[var(--auth-accent-soft)] dp-pulse" />
           <circle r="16" className="fill-[var(--auth-accent)]/15 stroke-[var(--auth-accent)]" />
           <g className="dp-spin">
-            {[0, 60, 120, 180, 240, 300].map((a) => (
+            {[
+              { a: 0, cx: 26, cy: 0 },
+              { a: 60, cx: 13, cy: 22.52 },
+              { a: 120, cx: -13, cy: 22.52 },
+              { a: 180, cx: -26, cy: 0 },
+              { a: 240, cx: -13, cy: -22.52 },
+              { a: 300, cx: 13, cy: -22.52 },
+            ].map(({ a, cx, cy }) => (
               <circle
                 key={a}
-                cx={Math.cos((a * Math.PI) / 180) * 26}
-                cy={Math.sin((a * Math.PI) / 180) * 26}
+                cx={cx}
+                cy={cy}
                 r="2.5"
                 className="fill-[var(--auth-accent)]"
               />

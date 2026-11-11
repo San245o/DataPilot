@@ -14,6 +14,7 @@ load_dotenv()
 
 logger = logging.getLogger("excel-agent-backend.model")
 MODEL_REQUEST_TIMEOUT_SECONDS = 45
+THINKING_MODEL = "gemini-3.5-flash-lite"
 
 SYSTEM_PROMPT_BASE = """You are a data analysis agent using pandas and plotly.
 
@@ -51,8 +52,9 @@ RULES:
 - For money/revenue totals, prefer amount columns like 'Total Spent', 'Total_Spent', 'Amount', 'Revenue' and parse with to_numeric_clean(...).fillna(0) before sum.
 - For COUNT / HOW MANY / TOTAL NUMBER questions, ALWAYS compute the scalar and emit the real executed answer with `log_output(...)` or `print(...)`. Do not leave the count only in Python variables.
 - For scalar query answers (counts, sums, averages, minimums, maximums), keep `assistant_reply` short and generic like 'Done.' so the final reply can be composed from executed output instead of guessing.
+- For a computed answer such as a winner or ranked comparison, set Python's assistant_reply variable to the actual answer after calculation. Log the supporting result rows in their intended display order with log_output(). If there are no matches, set assistant_reply to explain what did not match.
 - For non-ASCII / mojibake / encoding checks, prefer string methods like `.isascii()` when possible; `ord(...)`, `unicodedata`, and `math` are available if needed for simple compatibility logic.
-- Charts: assign to fig, never call fig.show/to_html/to_json
+- Charts: assign a single chart to fig or call log_chart(figure) for each chart when multiple are requested. Never call fig.show/to_html/to_json.
 - Prefer `px` for standard single-chart visualizations because it is the default/popular path here and produces simpler, more reliable code.
 - Use `go` and `make_subplots(...)` only when you need custom traces, secondary axes, or multi-panel/subplot layouts.
 - Subplots ARE allowed. For subplot layouts, build the figure with `make_subplots(...)`, add traces with `fig.add_trace(...)`, and keep the final figure in `fig`.
@@ -60,9 +62,11 @@ RULES:
 - If you mutate data (add/delete/update rows, append multiple rows, sort/reorder rows, or modify columns), set action_type='mutation' unless any additional output is also requested, then use action_type='combined'.
 - Multi-step tasks are allowed. If the user asks to clean/modify/filter/aggregate and then visualize or summarize, do all requested steps in one code block using the updated `df`, and return the final chart in `fig`.
 - For query/visualization requests, never replace `df` or `result_df` with a filtered subset; use print_query/log_output/highlight_rows and keep `result_df=df`.
-- Multiple selected datasets are available in `dfs`. Keys include both dataset ids and readable names, e.g. `dfs['orders.xlsx / Jan']`. Use multiple datasets when the user explicitly asks for work across files, such as merge, join, append, compare, lookup, match, consolidate, top/rank/list across selected files, pivot, chart, plot, or visualization. Otherwise work only with `df`.
+- The selected datasets are listed with exact IDs and names. Use dfs[dataset_id] for each requested dataset. df is only the active sheet. Iterate dfs.items() to visit each dataset once. Use each frame's attrs["name"] to display its name. Never use locals(), globals(), or filesystem access to discover data.
+- For comparisons across files, verify the join keys and row granularity before joining. Normalize names for matching and avoid multiplying rows when keys repeat. For rankings that combine different measures, state the scoring rule and units. Never add raw measures with different scales just because both are numeric.
+- When asked for an overview, summary, or charts across multiple files, cover each requested dataset using its own columns and units. Call log_output() with one concise computed text finding per dataset and log_chart() for each distinct chart. Avoid merging unrelated schemas. Keep result_df=df for read-only analysis.
 - If Selection context is provided, it came from the user selecting base-table cells/rows/columns and attaching the selected-range chip in chat. When the prompt says selected/selection/these/this range/within that, restrict queries and mutations to that selected scope. For mutations inside a selection, use get_selected_row_indices(), get_selected_columns(), selected_df(), or selection_context ranges, and do not edit outside the selected rows/columns/cells unless the user explicitly asks for that.
-- For explicit multi-dataset output tasks, create a new DataFrame such as `merged` or `comparison`, log it with `log_output(...)`, and set `result_df` to that new DataFrame. Do not overwrite source DataFrames.
+- When the user requests a new combined dataset, create a new DataFrame such as merged, log it with log_output(), and set result_df to that new DataFrame. Do not overwrite source DataFrames.
 - For structural MUTATIONS (add/drop columns/rows, clean datatypes): Modify `df` directly, return `result_df=df`, and set `table_request.enabled=False`. Do NOT create separate tables for this.
 - Cleaning, standardizing, coercing numeric columns, removing strings from numeric fields, and making values positive are mutation tasks. Persist the cleaned `df` instead of only logging summary statistics.
 - For FINDING/SEARCHING/FILTERING: use `highlight_rows(df[mask].index.tolist())` and also highlight the most relevant worked-with columns using `highlight_column(...)` or `highlight_columns([...])`.
@@ -102,40 +106,30 @@ THINKING_JSON_OUTPUT_CONTRACT = """STRICT OUTPUT CONTRACT:
 - table_request must include enabled (bool) and title (string).
 """
 
-THINKING_SUPPORTED_MODELS = {
-    "models/gemma-4-31b-it",
-    "minimaxai/minimax-m2.5",
-}
-
 VIZ_RULES = """
-VIZ RULES - template='plotly_dark', no text on bars/slices, limit 10-15 cats, single series showlegend=False
+PLOTLY CHARTS (apply when creating a chart):
+- Use Plotly Express (px) for standard charts. Use Graph Objects (go) and make_subplots for mixed trace types, secondary axes, or a custom panel layout. Use the actual columns available in the selected datasets.
+- Give each figure a specific title that says what is measured and how it is grouped, such as "Total runs by player". For separate charts from multiple datasets, identify the source in each title. Include the time period or a top-N cutoff when it matters.
+- Label every axis with a readable metric or category and its known unit. Use labels={column: display_name} with px so the labels also appear in legends and hover. With go, set explicit trace names and use fig.update_xaxes(title_text=...) and fig.update_yaxes(title_text=...). With subplots, set each panel's title and axis labels using row= and col=. Label color scales and 3D scene axes where applicable.
+- Use horizontal bars for long category names, a sorted line chart for dates, a scatter plot for relationships, and a histogram or box plot for distributions. Start bar value axes at zero. Keep time axes chronological, and order ranked categories by the measured value. Prefer a bar chart over a pie when close values need comparison.
+- In px, use hover_name for the item name and hover_data for useful context, such as team, date, or sample size. Format values with hover_data={"runs": ":,.0f"} and dates with strings such as "|%b %Y". Use False to hide redundant fields. Keep machine IDs and duplicated labels out unless they answer the question.
+- With go, or when px needs a custom tooltip, use customdata (custom_data in px) and set hovertemplate via update_traces or on each go trace. Use readable field names, units, and d3 formats. Use <extra></extra> if the trace name is already shown. For a pie, include the category, actual value, and share in hover.
+- Format counts as whole numbers, use suitable precision for measured values, and show currency only when it is known. Format proportions with .0% or .1% only when the data is 0–1. For values already on a 0–100 scale, use a % suffix. Use the same units and precision on the axis and in hover.
+- Keep categories and legends readable at dashboard size. Hide a redundant legend for a single series. Use distinct, consistent colors for comparison groups and ordered colors for a numeric heatmap. Let the canvas size the figure, use automargin=True on crowded axes, and avoid dense permanent text labels.
+- Aggregate a real measure with the appropriate operation, such as sum for an existing count column. Use groupby().size() only to count raw events. Keep missing values distinct from genuine zeroes unless the data meaning justifies filling them.
+- Assign a single finished figure to fig. For multiple independent charts, call log_chart() for each. Never call show(), to_html(), or to_json(). Keep result_df=df for a read-only chart.
 
-DEFAULT CHOICE:
-- Use px for normal bar/line/scatter/pie/histogram charts.
-- Use go + make_subplots only for subplot grids, mixed trace types, or highly custom layouts.
+PX EXAMPLE (replace the column names with actual fields):
+fig = px.bar(summary, x='total_runs', y='player', orientation='h', title='Total runs by player',
+             labels={'total_runs': 'Total runs', 'player': 'Player', 'team': 'Team'},
+             hover_name='player', hover_data={'player': False, 'team': True, 'total_runs': ':,.0f'})
+fig.update_xaxes(title_text='Total runs', tickformat=',.0f', rangemode='tozero', automargin=True)
+fig.update_yaxes(title_text='Player', categoryorder='total ascending', automargin=True)
 
-BAR (horizontal for long labels):
-data=df.groupby('Cat')['Val'].sum().nlargest(10).reset_index()
-fig=px.bar(data,x='Val',y='Cat',orientation='h',template='plotly_dark',title='Top 10')
-fig.update_layout(showlegend=False,yaxis={'categoryorder':'total ascending'})
-
-LINE: fig=px.line(trend,x='Year',y='Value',template='plotly_dark',markers=True)
-
-PIE: fig=px.pie(values=counts.values,names=counts.index,template='plotly_dark')
-fig.update_traces(textinfo='percent',hoverinfo='label+value+percent')
-
-SCATTER: fig=px.scatter(df,x='X',y='Y',template='plotly_dark',hover_data=['Name']) # Note: px.scatter does NOT accept a 'markers' argument (it uses markers by default)
-
-SUBPLOTS:
-fig = make_subplots(rows=1, cols=2, subplot_titles=['Left', 'Right'])
-fig.add_trace(go.Bar(x=left['x'], y=left['y'], name='Left'), row=1, col=1)
-fig.add_trace(go.Scatter(x=right['x'], y=right['y'], mode='lines', name='Right'), row=1, col=2)
-fig.update_layout(template='plotly_dark', showlegend=False)
-
-HEATMAP MATRIX RULE:
-- If data already has a metric/count column (e.g., accident_count, total, amount, revenue), aggregate with sum on that column.
-- Only use groupby(...).size() when each row is a raw event and no metric/count column exists.
-- Prefer pivot_table(values='metric_col', index='row_cat', columns='col_cat', aggfunc='sum', fill_value=0)
+GO HOVER EXAMPLE:
+trace = go.Bar(x=summary['player'], y=summary['total_runs'], name='Batting',
+               customdata=summary[['team']],
+               hovertemplate='<b>%{x}</b><br>Total runs: %{y:,.0f}<br>Team: %{customdata[0]}<extra></extra>')
 """
 
 MERGE_RULES = """
@@ -152,8 +146,8 @@ CORR_RULES = """
 CORRELATION RULES:
 - Use numeric only: num_df=df.select_dtypes(include=[np.number])
 - Drop cols with <=1 non-null; need >=2 numeric cols
-- Matrix: px.imshow(corr,text_auto='.2f',color_continuous_scale='RdBu_r',zmin=-1,zmax=1,template='plotly_dark')
-- Pair: scatter with trendline='ols', show r in title
+- Matrix: px.imshow(corr,text_auto='.2f',color_continuous_scale='RdBu_r',zmin=-1,zmax=1,labels={'color':'Pearson r'})
+- Pair: use px.scatter; for an optional linear fit, use np.polyfit on valid numeric pairs and add a named go.Scatter line. Show Pearson r only if it was calculated. Do not request trendline='ols', which needs statsmodels.
 """
 
 TIME_RULES = """
@@ -195,7 +189,7 @@ _TABLE_INTENT_KW = {
 def _build_system_prompt(prompt: str) -> str:
     p = prompt.lower()
     parts = [SYSTEM_PROMPT_BASE]
-    if any(k in p for k in _VIZ_KW):
+    if requests_visualization(prompt):
         parts.append(VIZ_RULES)
     if any(k in p for k in _MERGE_KW):
         parts.append(MERGE_RULES)
@@ -208,8 +202,32 @@ def _build_system_prompt(prompt: str) -> str:
     return "\n".join(parts)
 
 
-def supports_thinking_model(model_name: str) -> bool:
-    return model_name in THINKING_SUPPORTED_MODELS
+def requests_visualization(prompt: str) -> bool:
+    return any(keyword in prompt.lower() for keyword in _VIZ_KW)
+
+
+def requests_dataset_summary(prompt: str) -> bool:
+    return bool(re.search(r"\b(?:summari[sz]\w*|summary|overview)\b", prompt, flags=re.IGNORECASE))
+
+
+MULTI_DATASET_SUMMARY_INSTRUCTIONS = (
+    "Cover every dataset in the Selected datasets list. For each dataset, load it by ID from dfs "
+    "and execute code that calls log_output() with a computed finding prefixed by the exact dataset name, including its file extension. "
+    "When the user requests visualizations, call log_chart() once per dataset that supports a useful chart. "
+    "Use a separate figure with the dataset name in its title. Keep source datasets unchanged."
+)
+
+
+def complete_dataset_summary(text: str, contexts: list[dict[str, Any]]) -> str:
+    reported = text.casefold()
+    missing = [
+        f"- {context['name']}: {context['row_count']:,} rows, {len(context.get('columns') or [])} columns."
+        for context in contexts
+        if context.get("name") and context["name"].casefold() not in reported
+    ]
+    if not missing:
+        return text
+    return "\n\n".join(part for part in (text, "Dataset overview\n" + "\n".join(missing)) if part)
 
 
 def _build_output_contract(thinking_mode: bool) -> str:
@@ -315,7 +333,7 @@ def _fallback_reasoning_steps(
 
 def _is_mutation_only(prompt: str) -> bool:
     p = prompt.lower()
-    has_mutation = any(k in p for k in _MUTATION_KW)
+    has_mutation = any(re.search(rf'\b{re.escape(keyword)}\b', p) for keyword in _MUTATION_KW)
     has_viz = any(k in p for k in _VIZ_KW)
     return has_mutation and not has_viz
 
@@ -395,29 +413,30 @@ def _repair_common_json_issues(text: str) -> str:
 
 def _extract_json(raw: str) -> dict[str, Any]:
     text = raw.strip()
-    m = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
-    if m:
-        text = m.group(1).strip()
-    text = _extract_last_likely_json_object(text) or _extract_first_object(text)
-
-    # First attempt: strict JSON.
+    fenced = re.fullmatch(r"```(?:json)?\s*([\s\S]*?)```", text, flags=re.IGNORECASE)
+    if fenced:
+        text = fenced.group(1).strip()
+    # Braces and Markdown fences inside valid JSON strings are part of the answer.
     try:
         payload = json.loads(text)
-        if not isinstance(payload, dict):
-            raise ValueError("Expected JSON object")
-        return payload
     except json.JSONDecodeError:
         pass
-
-    # Second attempt: repair common malformed JSON issues.
-    try:
-        repaired_json = _repair_common_json_issues(text)
-        payload = json.loads(repaired_json)
+    else:
         if not isinstance(payload, dict):
             raise ValueError("Expected JSON object")
         return payload
-    except Exception:
-        pass
+
+    embedded_fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+    if embedded_fence:
+        text = embedded_fence.group(1).strip()
+    text = _extract_last_likely_json_object(text) or _extract_first_object(text)
+    for candidate in (text, _repair_common_json_issues(text)):
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload
 
     # Fallback for models that return Python-like dicts with single quotes.
     try:
@@ -458,7 +477,11 @@ def _parse_model_response(raw: str) -> dict[str, Any]:
     return payload
 
 
-def _invoke_model(*, model_name: str, system_prompt: str, user_message: str) -> tuple[str, dict[str, int]]:
+def _invoke_model(
+    *, model_name: str, system_prompt: str, user_message: str,
+    request_timeout: float | None = MODEL_REQUEST_TIMEOUT_SECONDS,
+    response_schema: dict[str, Any] | None = None,
+) -> tuple[str, dict[str, int]]:
     usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     normalized_model = (model_name or "").strip()
     if not normalized_model:
@@ -544,19 +567,20 @@ def _invoke_model(*, model_name: str, system_prompt: str, user_message: str) -> 
         raise RuntimeError("GEMINI_API_KEY not set")
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(normalized_model)
+    model_id = normalized_model.removeprefix("models/")
     generation_config: dict[str, Any] = {"temperature": 0}
-    # Enable JSON mode for Gemini-hosted Gemini and Gemma models.
-    if (
-        normalized_model.startswith("gemini")
-        or normalized_model.startswith("models/gemini")
-        or normalized_model.startswith("gemma")
-        or normalized_model.startswith("models/gemma")
-    ):
+    if model_id.startswith("gemini"):
         generation_config["response_mime_type"] = "application/json"
+    if response_schema is not None:
+        generation_config["response_schema"] = response_schema
 
+    request_options: dict[str, Any] = {"timeout": request_timeout}
+    if request_timeout != MODEL_REQUEST_TIMEOUT_SECONDS:
+        # Keep explicitly bounded calls to one API attempt.
+        request_options["retry"] = None
     response = model.generate_content(
         [system_prompt, user_message], generation_config=generation_config,
-        request_options={"timeout": MODEL_REQUEST_TIMEOUT_SECONDS},
+        request_options=request_options,
     )  # type: ignore
 
     raw = response.text or ""
@@ -567,8 +591,15 @@ def _invoke_model(*, model_name: str, system_prompt: str, user_message: str) -> 
     return raw, usage
 
 
-def invoke_model_json(*, model_name: str, system_prompt: str, user_message: str) -> tuple[dict[str, Any], dict[str, int], str]:
-    raw, usage = _invoke_model(model_name=model_name, system_prompt=system_prompt, user_message=user_message)
+def invoke_model_json(
+    *, model_name: str, system_prompt: str, user_message: str,
+    request_timeout: float | None = MODEL_REQUEST_TIMEOUT_SECONDS,
+    response_schema: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, int], str]:
+    raw, usage = _invoke_model(
+        model_name=model_name, system_prompt=system_prompt, user_message=user_message,
+        request_timeout=request_timeout, response_schema=response_schema,
+    )
     payload = _extract_json(raw)
     if not isinstance(payload, dict):
         raise ValueError("Expected JSON object from model")
@@ -602,34 +633,19 @@ def clean_final_reply_text(reply: str, *, initial_reply: str, wants_list: bool =
     )
 
     cleaned_lines: list[str] = []
+    seen_bullets: set[str] = set()
     for raw_line in text.splitlines():
         line = raw_line.strip()
-        if not line:
-            continue
         lower = line.lower()
-        if lower.startswith(meta_prefixes):
+        if lower.startswith(meta_prefixes) or any(token in lower for token in meta_contains):
             continue
-        if any(token in lower for token in meta_contains):
-            continue
-        cleaned_lines.append(line)
+        if wants_list and line.startswith(("- ", "* ")):
+            if line in seen_bullets:
+                continue
+            seen_bullets.add(line)
+        cleaned_lines.append(raw_line.rstrip())
 
-    if wants_list:
-        bullet_lines = [line for line in cleaned_lines if line.startswith(("-", "*"))]
-        if bullet_lines:
-            unique_bullets: list[str] = []
-            for line in bullet_lines:
-                normalized = line.strip()
-                if normalized not in unique_bullets:
-                    unique_bullets.append(normalized)
-            return "\n".join(unique_bullets)
-
-    for line in reversed(cleaned_lines):
-        candidate = line.strip().strip("`").strip("\"'")
-        if not candidate:
-            continue
-        return candidate
-
-    return initial_reply
+    return "\n".join(cleaned_lines).strip() or initial_reply
 
 
 def _trim_history(history: list[dict[str, str]], max_turns: int = 3) -> list[dict[str, str]]:
@@ -702,18 +718,20 @@ def generate_code(
 
     if dataset_contexts:
         compact_contexts = []
-        for item in dataset_contexts[:8]:
+        for index, item in enumerate(dataset_contexts):
             compact_contexts.append({
                 "dataset_id": item.get("dataset_id"),
                 "name": item.get("name"),
                 "row_count": item.get("row_count"),
                 "columns": item.get("columns"),
                 "types": item.get("dtypes"),
-                "sample_rows": (item.get("sample_rows") or [])[:2],
-                "ranges": item.get("value_ranges"),
-                "categories": item.get("top_categories"),
+                "sample_rows": (item.get("sample_rows") or [])[:2] if index < 8 else [],
+                "ranges": item.get("value_ranges") if index < 8 else None,
+                "categories": item.get("top_categories") if index < 8 else None,
             })
         ctx.append(f"Selected datasets: {json.dumps(compact_contexts)}")
+        if len(compact_contexts) > 1 and requests_dataset_summary(prompt):
+            ctx.append(MULTI_DATASET_SUMMARY_INSTRUCTIONS)
 
     if selection_context:
         ctx.append(f"Selection context: {json.dumps(selection_context)}")

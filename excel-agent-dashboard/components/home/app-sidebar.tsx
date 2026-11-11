@@ -45,6 +45,7 @@ export function Logo({ size = "md" }: { size?: "md" | "sm" }) {
 
 function ProfileMenu() {
   const [open, setOpen] = useState(false);
+  const [logoutError, setLogoutError] = useState("");
   const [userName, setUserName] = useState("User");
   const [userEmail, setUserEmail] = useState("");
   const [initials, setInitials] = useState("DP");
@@ -83,8 +84,12 @@ function ProfileMenu() {
   }, [open]);
 
   const handleLogout = async () => {
-    setOpen(false);
-    await logoutUser();
+    setLogoutError("");
+    try {
+      await logoutUser();
+    } catch {
+      setLogoutError("Sign-out failed. Please try again.");
+    }
   };
 
   return (
@@ -115,6 +120,7 @@ function ProfileMenu() {
             <LogOut className="size-4 text-destructive" />
             Logout
           </button>
+          {logoutError && <p role="alert" className="px-3.5 pb-2 text-xs text-destructive">{logoutError}</p>}
         </div>
       )}
       <button

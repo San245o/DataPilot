@@ -14,9 +14,10 @@ type PlotlyBoardProps = {
   layout?: Partial<Layout>
   frames?: Frame[]
   isDark?: boolean
+  showTitle?: boolean
 }
 
-export function PlotlyBoard({ data, layout, frames, isDark = true }: PlotlyBoardProps) {
+export function PlotlyBoard({ data, layout, frames, isDark = true, showTitle = true }: PlotlyBoardProps) {
   const fontColor = isDark ? "#aab8cb" : "#334155"
   const titleColor = isDark ? "#e6edf5" : "#1f2d3d"
   const gridColor = isDark ? "rgba(148,163,184,0.08)" : "rgba(0,0,0,0.05)"
@@ -32,9 +33,9 @@ export function PlotlyBoard({ data, layout, frames, isDark = true }: PlotlyBoard
     paper_bgcolor: bgColor,
     plot_bgcolor: bgColor,
     colorway,
-    margin: { l: 42, r: 18, t: 52, b: 44 },
+    margin: { l: 42, r: 18, t: showTitle ? 52 : 28, b: 44 },
     font: { size: 12, color: fontColor, family: "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" },
-    title: layout?.title
+    title: showTitle && layout?.title
       ? {
           ...(typeof layout.title === "object" ? layout.title : { text: String(layout.title) }),
           x: 0.03,

@@ -1,174 +1,97 @@
-"use client";
+"use client"
 
-import { useState, type ChangeEvent, type FormEvent } from "react";
-import { Lock, Mail } from "lucide-react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { loginWithEmailPassword, loginWithGoogle } from "@/lib/auth/client";
+import { useState, type FormEvent } from "react"
+import { Lock, Mail } from "lucide-react"
+import { loginWithEmailPassword } from "@/lib/auth/client"
 
-import AuthField from "./AuthField";
-import {
-  AuthHeading,
-  GoogleButton,
-  OrDivider,
-  PrimaryButton,
-} from "./AuthExtras";
+import AuthField from "./AuthField"
+import { AuthHeading, PrimaryButton } from "./AuthExtras"
 
-type LoginValues = {
-  email: string;
-  password: string;
-};
-
-type LoginErrors = {
-  email?: string | undefined;
-  password?: string | undefined;
-  general?: string | undefined;
-};
+const TEST_EMAILS = ["analyst@example.test", "reviewer@example.test"]
+const TEST_PASSWORD = "datapilot-test"
+const WORKSPACE_PATH = /^\/(home|dashboard|report|chart-viewer|history|tutorials)([/?#]|$)/
 
 export function LoginForm() {
-  const router = useRouter();
-  const [values, setValues] = useState<LoginValues>({
-    email: "",
-    password: "",
-  });
+  const [email, setEmail] = useState("")
+  const [password, setPassword] = useState("")
+  const [error, setError] = useState("")
+  const [loading, setLoading] = useState(false)
 
-  const [errors, setErrors] = useState<LoginErrors>({});
-  const [loading, setLoading] = useState(false);
-
-  const handleChange =
-    (field: keyof LoginValues) => (event: ChangeEvent<HTMLInputElement>) => {
-      const value = event.target.value;
-
-      setValues((previous) => ({
-        ...previous,
-        [field]: value,
-      }));
-
-      setErrors((previous) => ({
-        ...previous,
-        [field]: undefined,
-        general: undefined,
-      }));
-    };
-
-  const validate = (): boolean => {
-    const nextErrors: LoginErrors = {};
-
-    if (!values.email.trim()) {
-      nextErrors.email = "Email address is required.";
-    } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(values.email)) {
-      nextErrors.email = "Enter a valid email address.";
-    }
-
-    if (!values.password) {
-      nextErrors.password = "Password is required.";
-    }
-
-    setErrors(nextErrors);
-
-    return !nextErrors.email && !nextErrors.password;
-  };
-
-  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-
-    if (!validate()) {
-      return;
-    }
-
-    setLoading(true);
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (loading) return
+    setError("")
+    setLoading(true)
 
     try {
-      const res = await loginWithEmailPassword(values.email, values.password);
-
-      if (!res.ok) {
-        setErrors((prev) => ({
-          ...prev,
-          general: res.error || "Failed to sign in. Please check your credentials.",
-        }));
-      } else {
-        router.push("/home");
-        router.refresh();
-      }
-    } catch (err: unknown) {
-      setErrors((prev) => ({
-        ...prev,
-        general: err instanceof Error ? err.message : "Failed to sign in. Please try again.",
-      }));
-    } finally {
-      setLoading(false);
+      await loginWithEmailPassword(email, password)
+      const requested = new URLSearchParams(window.location.search).get("redirectTo")
+      window.location.assign(requested && WORKSPACE_PATH.test(requested) ? requested : "/home")
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Sign-in failed.")
+      setLoading(false)
     }
-  };
-
-  const handleGoogle = async () => {
-    try {
-      await loginWithGoogle();
-    } catch (err: unknown) {
-      setErrors((prev) => ({
-        ...prev,
-        general: err instanceof Error ? err.message : "Google authentication failed.",
-      }));
-    }
-  };
+  }
 
   return (
     <div>
-      <AuthHeading
-        title="Welcome back"
-        subtitle="Sign in to continue to your DataPilot workspace."
-      />
+      <AuthHeading title="Sign in to DataPilot" subtitle="Choose a test account to open the local workspace." />
 
-      {errors.general && (
-        <div className="mb-4 rounded-xl border border-red-900/60 bg-red-950/30 p-3 text-xs text-red-300">
-          {errors.general}
-        </div>
+      <div className="mb-5 flex flex-wrap gap-2">
+        {TEST_EMAILS.map((address) => (
+          <button
+            key={address}
+            type="button"
+            disabled={loading}
+            onClick={() => {
+              setEmail(address)
+              setPassword(TEST_PASSWORD)
+              setError("")
+            }}
+            className="rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-200 hover:border-emerald-400 hover:text-emerald-300 disabled:opacity-50"
+          >
+            {address}
+          </button>
+        ))}
+      </div>
+
+      {error && (
+        <p role="alert" className="mb-4 rounded-xl border border-red-900/60 bg-red-950/30 p-3 text-xs text-red-300">
+          {error}
+        </p>
       )}
 
-      <form onSubmit={handleSubmit} noValidate className="space-y-4">
+      <form onSubmit={handleSubmit} className="space-y-4">
         <AuthField
-          label="Email Address"
+          label="Test email"
           icon={Mail}
           type="email"
-          autoComplete="email"
-          placeholder="you@company.com"
-          value={values.email}
-          onChange={handleChange("email")}
-          error={errors.email}
+          autoComplete="username"
+          placeholder="analyst@example.test"
+          value={email}
+          onChange={(event) => {
+            setEmail(event.target.value)
+            setError("")
+          }}
+          required
         />
-
-        <div>
-          <AuthField
-            label="Password"
-            icon={Lock}
-            isPassword
-            autoComplete="current-password"
-            placeholder="Enter your password"
-            value={values.password}
-            onChange={handleChange("password")}
-            error={errors.password}
-          />
-        </div>
-
-        <PrimaryButton type="submit" loading={loading}>
-          Sign In
-        </PrimaryButton>
+        <AuthField
+          label="Password"
+          icon={Lock}
+          isPassword
+          autoComplete="current-password"
+          placeholder="Enter the test password"
+          value={password}
+          onChange={(event) => {
+            setPassword(event.target.value)
+            setError("")
+          }}
+          required
+        />
+        <PrimaryButton type="submit" loading={loading}>Sign in</PrimaryButton>
       </form>
-
-      <OrDivider />
-
-      <GoogleButton onClick={handleGoogle} />
-
-      <p className="mt-6 text-center text-xs text-slate-400">
-        Don&apos;t have an account?{" "}
-        <Link
-          href="/register"
-          className="font-semibold text-emerald-400 hover:text-emerald-300 hover:underline"
-        >
-          Sign up
-        </Link>
-      </p>
     </div>
-  );
+  )
 }
 
-export default LoginForm;
+export default LoginForm

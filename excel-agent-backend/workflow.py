@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from langgraph.graph import END, StateGraph
 
-from agent import draft_final_reply, generate_code, generate_fix
+from agent import complete_dataset_summary, draft_final_reply, generate_code, generate_fix, requests_dataset_summary
 from sandbox import run_sandboxed
 
 _MUTATION_KW = {
@@ -81,8 +81,10 @@ class AgentState(TypedDict, total=False):
     action_type: str
     code: str
     assistant_reply: str
+    executed_answer: str | None
     result_rows: list[dict[str, Any]]
     visualization: dict[str, Any] | None
+    visualizations: list[dict[str, Any]]
     query_output: str | None
     mutation: bool
     highlight_indices: list[int]
@@ -213,7 +215,7 @@ def _is_mutation_only(prompt: str) -> bool:
 
 def _has_mutation_intent(prompt: str) -> bool:
     p = prompt.lower()
-    return any(k in p for k in _MUTATION_KW)
+    return any(re.search(rf"\b{re.escape(keyword)}\b", p) for keyword in _MUTATION_KW)
 
 
 def _has_inplace_cleaning_signal(code: str) -> bool:
@@ -621,16 +623,20 @@ def _execute_code(state: AgentState) -> AgentState:
             or has_inplace_cleaning_signal
             or row_growth
         )
-        row_deletion_blocked = len(result.rows) < len(rows) and not _allows_row_deletion(prompt)
+        allows_row_deletion = _allows_row_deletion(prompt)
+        wants_source_update = is_mutation_action and not is_multi_dataset_output and (
+            not result.separate_result or has_mutation_intent or allows_row_deletion
+        )
+        row_deletion_blocked = wants_source_update and len(result.rows) < len(rows) and not allows_row_deletion
 
-        mutation_applied = bool(result.mutation and is_mutation_action and not row_deletion_blocked and not is_multi_dataset_output)
+        mutation_applied = bool(result.mutation and wants_source_update and not row_deletion_blocked)
         created_datasets: list[dict[str, Any]] = []
         updated_datasets: list[dict[str, Any]] = []
         dataset_names = state.get("dataset_names") or {}
         active_dataset_id = state.get("active_dataset_id")
         final_rows = result.rows if mutation_applied else rows
 
-        if is_multi_dataset_output and result.rows:
+        if is_multi_dataset_output and result.mutation and result.rows:
             selected_names = [dataset_names.get(dataset_id, dataset_id) for dataset_id in unique_selected_ids]
             created_datasets.append({
                 "id": uuid4().hex,
@@ -660,16 +666,19 @@ def _execute_code(state: AgentState) -> AgentState:
             query_output = f"{query_output}\n\n{guard_note}" if query_output else guard_note
 
         query_tables: list[dict[str, Any]] = []
-        if (table_enabled or explicit_table_intent) and not mutation_applied:
-            table_rows = result.query_table_rows or []
-            if not table_rows and result.highlight_indices:
+        table_rows = result.query_table_rows
+        if table_rows is None and result.separate_result and result.mutation and not wants_source_update:
+            table_rows = result.rows
+        show_table = table_enabled or explicit_table_intent or (
+            table_rows is not None and (len(unique_selected_ids) > 1 or result.separate_result)
+        )
+        if show_table and not mutation_applied:
+            if table_rows is None and result.highlight_indices:
                 table_rows = _rows_from_highlights(final_rows, result.highlight_indices)
-            if not table_rows and final_rows and explicit_table_intent:
-                table_rows = final_rows[:50]
             if table_rows:
                 query_tables = [{
                     "id": uuid4().hex,
-                    "title": table_title,
+                    "title": "Analysis result" if table_title == "Query Table" and len(unique_selected_ids) > 1 else table_title,
                     "rows": table_rows,
                 }]
 
@@ -684,9 +693,11 @@ def _execute_code(state: AgentState) -> AgentState:
         payload: AgentState = {
             "result_rows": final_rows,
             "visualization": result.visualization,
+            "visualizations": result.visualizations,
             "query_output": query_output,
-            "query_table_rows": result.query_table_rows,
+            "query_table_rows": table_rows,
             "query_tables": query_tables,
+            "executed_answer": result.assistant_reply,
             "mutation": mutation_applied,
             "highlight_indices": result.highlight_indices,
             "highlighted_columns": highlighted_columns,
@@ -965,21 +976,32 @@ def _compose_assistant_reply(state: AgentState) -> AgentState:
     explicit_table_intent = _wants_separate_table(prompt)
     wants_list_response = _wants_list_response(prompt)
     query_table_rows = state.get("query_table_rows")
+    dataset_contexts = state.get("dataset_contexts") or []
+    safety_notes = _extract_safety_notes(query_output)
+    executed_answer = state.get("executed_answer")
+
+    if executed_answer:
+        return {"assistant_reply": "\n\n".join(part for part in (executed_answer, safety_notes) if part)}
+
+    if len(dataset_contexts) > 1 and requests_dataset_summary(prompt) and not explicit_table_intent and not state.get("error"):
+        return {"assistant_reply": complete_dataset_summary(query_output, dataset_contexts)}
+
+    if query_table_rows == []:
+        return {"assistant_reply": "The analysis returned no matching rows."}
 
     if not query_output:
         if has_mutation_intent and not mutation_applied and not visualization and not query_tables and not highlight_indices:
             return {"assistant_reply": _mutation_noop_reply(prompt)}
-        table_ack = _build_table_acknowledgement(query_tables) if explicit_table_intent else ""
+        table_ack = _build_table_acknowledgement(query_tables)
         if table_ack:
             return {"assistant_reply": table_ack}
         return {"assistant_reply": reply}
 
-    safety_notes = _extract_safety_notes(query_output)
     reply_lower = reply.lower()
     is_generic_reply = reply_lower in {"done", "done.", "completed", "completed."} or len(reply) < 16
 
     # For chart-focused requests, avoid dumping table previews into chat.
-    if action_type in ("visualization", "combined"):
+    if action_type in ("visualization", "combined") and not query_tables:
         if safety_notes and safety_notes.lower() not in reply_lower:
             if reply:
                 return {"assistant_reply": f"{reply}\n\n{safety_notes}"}
@@ -1029,6 +1051,10 @@ def _compose_assistant_reply(state: AgentState) -> AgentState:
             if safety_notes and safety_notes.lower() not in query_ack.lower():
                 return {"assistant_reply": f"{query_ack}\n\n{safety_notes}"}
             return {"assistant_reply": query_ack}
+
+        if query_tables:
+            table_ack = _build_table_acknowledgement(query_tables)
+            return {"assistant_reply": "\n\n".join(part for part in (table_ack, safety_notes) if part)}
 
         if not is_generic_reply:
             if safety_notes and safety_notes.lower() not in reply_lower:

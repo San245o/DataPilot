@@ -1,15 +1,14 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
-import { BrainCircuit, ChevronDown, Code, Loader2, Plus, Send, Square, Table2, X } from "lucide-react"
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type SetStateAction } from "react"
+import { AlertCircle, BrainCircuit, Check, ChevronDown, Code, Loader2, Paperclip, Plus, Send, Square, Table2, X } from "lucide-react"
 
 import {
+  DATASET_DRAG_TYPE,
   SLASH_COMMANDS,
-  SLASH_DESCRIPTION_DELAY_MS,
-  SLASH_ROW_GAP,
-  SLASH_ROW_HEIGHT,
   type ChatMessage,
   type DataSelectionContext,
+  type PivotTableTab,
   type SlashCommandOption,
   type ThinkingTraceEntry,
   type WorkspaceDataset,
@@ -18,15 +17,22 @@ import {
 type ChatPanelProps = {
   width: number
   chatMessages: ChatMessage[]
+  resultTables: PivotTableTab[]
   highlightedMessageIndex: number | null
   pendingSelectionContext: DataSelectionContext | null
   attachedSelectionContext: DataSelectionContext | null
   prompt: string
   isRunning: boolean
+  isUploading: boolean
   error: string | null
   thinkingMode: boolean
   modelLabel: string
   datasets: WorkspaceDataset[]
+  scopeDatasets: WorkspaceDataset[]
+  detachableDatasetIds: string[]
+  onDropFiles: (files: File[]) => void
+  onAttachDataset: (id: string) => void
+  onDetachDataset: (id: string) => void
   onPromptChange: (value: string) => void
   onSubmit: () => void
   onCancel: () => void
@@ -35,6 +41,47 @@ type ChatPanelProps = {
   onOpenTableLink: (tableId: string) => void
   onAttachSelection: () => void
   onClearSelection: () => void
+}
+
+function isDatasetDrop(transfer: DataTransfer) {
+  return transfer.types.includes("Files") || transfer.types.includes(DATASET_DRAG_TYPE)
+}
+
+function ResultTablePreview({ table, onOpen }: { table: PivotTableTab; onOpen: () => void }) {
+  const columns = Object.keys(table.rows[0] ?? {})
+  return (
+    <section aria-label={`Result table: ${table.title}`} className="min-w-0 overflow-hidden rounded-lg border border-border bg-card/70">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 px-2.5 py-2">
+        <div className="min-w-0">
+          <h4 className="break-words text-xs font-semibold">{table.title}</h4>
+          <p className="text-[10px] text-muted-foreground">{table.rows.length.toLocaleString()} rows</p>
+        </div>
+        <button type="button" onClick={onOpen} className="inline-flex shrink-0 items-center gap-1 rounded border border-primary/30 px-2 py-1 text-[11px] font-semibold text-primary hover:bg-primary/10">
+          <Table2 aria-hidden="true" className="size-3" />
+          Open table
+        </button>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-left text-[11px]">
+          <thead className="bg-muted/60 text-muted-foreground">
+            <tr>{columns.map((column) => <th key={column} scope="col" className="whitespace-nowrap px-2 py-1.5">{column}</th>)}</tr>
+          </thead>
+          <tbody>
+            {table.rows.slice(0, 3).map((row, rowIndex) => (
+              <tr key={rowIndex} className="border-t border-border/50">
+                {columns.map((column) => (
+                  <td key={column} className="max-w-36 truncate px-2 py-1.5" title={String(row[column] ?? "")}>
+                    {row[column] == null || row[column] === "" ? "—" : String(row[column])}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {table.rows.length > 3 && <p className="border-t border-border/60 px-2.5 py-1.5 text-[10px] text-muted-foreground">Showing first 3 rows</p>}
+    </section>
+  )
 }
 
 function renderSimpleMarkdown(text: string) {
@@ -99,53 +146,103 @@ function renderSimpleMarkdown(text: string) {
   return <>{elements}</>
 }
 
-type AssistantTextProps = {
-  text: string
+function getActivitySteps(trace: ThinkingTraceEntry[]) {
+  const steps: { action: ThinkingTraceEntry; result?: ThinkingTraceEntry }[] = []
+  for (const entry of trace) {
+    if (entry.kind === "action") {
+      steps.push({ action: entry })
+    } else if (entry.kind === "observation") {
+      const step = entry.call_id
+        ? steps.findLast((item) => item.action.call_id === entry.call_id)
+        : steps.at(-1)
+      if (step) step.result = entry
+      else steps.push({ action: entry, result: entry })
+    }
+  }
+  return steps
 }
 
-function AssistantText({ text }: AssistantTextProps) {
-  const [visibleLength, setVisibleLength] = useState(0)
+function AnalysisActivity({
+  trace,
+  live,
+  model,
+  open,
+  onToggle,
+}: {
+  trace: ThinkingTraceEntry[]
+  live: boolean
+  model: string
+  open: boolean
+  onToggle: () => void
+}) {
+  const steps = getActivitySteps(trace)
 
-  useEffect(() => {
-    const interval = window.setInterval(() => {
-      setVisibleLength((prev) => {
-        if (prev >= text.length) {
-          window.clearInterval(interval)
-          return text.length
-        }
-        return prev + Math.max(1, Math.ceil((text.length - prev) / 12))
-      })
-    }, 24)
-
-    return () => window.clearInterval(interval)
-  }, [text])
-
-  const visibleText = text.slice(0, visibleLength)
   return (
-    <div className="max-w-[90%] px-1 py-1 text-[13px] leading-relaxed text-foreground/92">
-      {renderSimpleMarkdown(visibleText)}
-      {visibleLength < text.length && (
-        <span className="ml-0.5 inline-block h-4 w-[2px] translate-y-[2px] animate-pulse bg-primary/80 align-middle" />
+    <div className="mb-2 w-full max-w-[90%] overflow-hidden rounded-xl border border-border/60">
+      <button
+        type="button"
+        title={model}
+        aria-label={open ? "Hide analysis steps" : "Show analysis steps"}
+        aria-expanded={open}
+        onClick={onToggle}
+        className="flex w-full min-w-0 items-center gap-2 px-3 py-2.5 text-left hover:bg-accent/30"
+      >
+        {live
+          ? <Loader2 aria-hidden="true" className="size-4 shrink-0 text-primary motion-safe:animate-spin" />
+          : <BrainCircuit aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" />}
+        <span role="status" className="flex-1 truncate text-xs font-medium">
+          {live ? "Thinking" : "Analysis"}
+        </span>
+        {steps.length > 0 && <span className="text-[11px] tabular-nums text-muted-foreground">{steps.length}</span>}
+        <ChevronDown aria-hidden="true" className={`size-3 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+      {open && (
+        <div className="px-3 pb-3">
+          {steps.length === 0 ? (
+            <p className="text-xs text-muted-foreground">{live ? "Reviewing request…" : "Answered from context"}</p>
+          ) : (
+            <ol className="max-h-64 space-y-2 overflow-y-auto">
+              {steps.map(({ action, result }, index) => {
+                const failed = result?.status === "error"
+                const pending = live && !result
+                const details = [action.tool_input, result?.details].filter(Boolean)
+                const label = action.content.replace(/\s+/g, " ").replace(/[.]$/, "")
+                const outcome = result && result !== action
+                  ? result.content.split("\n")[0].slice(0, 140)
+                  : ""
+                const row = (
+                  <>
+                    {failed ? <AlertCircle aria-hidden="true" className="mt-0.5 size-3.5 shrink-0 text-destructive" />
+                      : pending ? <Loader2 aria-hidden="true" className="mt-0.5 size-3.5 shrink-0 text-primary motion-safe:animate-spin" />
+                        : <Check aria-hidden="true" className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />}
+                    <span className="min-w-0 flex-1">
+                      <span className={`block break-words ${failed ? "text-destructive" : "text-foreground/90"}`}>{label}</span>
+                      {outcome && <span className="mt-0.5 block break-words text-muted-foreground">{outcome}</span>}
+                    </span>
+                  </>
+                )
+                return (
+                  <li key={action.call_id ?? index} className="min-w-0 text-xs leading-relaxed">
+                    {details.length > 0 ? (
+                      <details>
+                        <summary className="flex cursor-pointer list-none items-start gap-2 [&::-webkit-details-marker]:hidden">
+                          {row}
+                          <Code aria-hidden="true" className="mt-0.5 size-3 shrink-0 text-muted-foreground/60" />
+                        </summary>
+                        {details.map((preview, previewIndex) => (
+                          <pre key={previewIndex} className="mt-2 max-h-40 overflow-auto rounded-md bg-muted/50 p-2 text-[11px]">{preview}</pre>
+                        ))}
+                      </details>
+                    ) : <div className="flex items-start gap-2">{row}</div>}
+                  </li>
+                )
+              })}
+            </ol>
+          )}
+        </div>
       )}
     </div>
   )
-}
-
-function getTraceLabel(entry: ThinkingTraceEntry) {
-  if (entry.kind === "thought") return "Thinking"
-  if (entry.kind === "action") return "Action"
-  return entry.status === "error" ? "Error" : "Observation"
-}
-
-function getTraceDotClass(entry: ThinkingTraceEntry) {
-  if (entry.kind === "thought") return "bg-primary"
-  if (entry.kind === "action") return "bg-amber-500"
-  return entry.status === "error" ? "bg-destructive" : "bg-emerald-500"
-}
-
-function shouldHideObservationLead(entry: ThinkingTraceEntry) {
-  if (entry.kind !== "observation" || !entry.details || entry.status === "error") return false
-  return /^(Returned \d+ (rows|items)|Found \d+ matching rows\.|The tool returned )/i.test(entry.content.trim())
 }
 
 function selectionTypeLabel(selection: DataSelectionContext) {
@@ -290,15 +387,22 @@ function renderPromptTokens(text: string, datasets: WorkspaceDataset[], surface:
 export function ChatPanel({
   width,
   chatMessages,
+  resultTables,
   highlightedMessageIndex,
   pendingSelectionContext,
   attachedSelectionContext,
   prompt,
   isRunning,
+  isUploading,
   error,
   thinkingMode,
   modelLabel,
   datasets,
+  scopeDatasets,
+  detachableDatasetIds,
+  onDropFiles,
+  onAttachDataset,
+  onDetachDataset,
   onPromptChange,
   onSubmit,
   onCancel,
@@ -308,25 +412,44 @@ export function ChatPanel({
   onAttachSelection,
   onClearSelection,
 }: ChatPanelProps) {
+  const [isDropTarget, setIsDropTarget] = useState(false)
+  const dropDepth = useRef(0)
+  const attachInput = useRef<HTMLInputElement>(null)
   const [expandedCodeIndex, setExpandedCodeIndex] = useState<number | null>(null)
   const [transcriptVisibilityOverrides, setTranscriptVisibilityOverrides] = useState<Record<number, boolean>>({})
-  const [selectedSlashIndex, setSelectedSlashIndex] = useState(0)
-  const [selectedDatasetIndex, setSelectedDatasetIndex] = useState(0)
+  const [slashSelection, setSlashSelection] = useState({ query: null as string | null, index: 0 })
+  const [datasetSelection, setDatasetSelection] = useState({ query: null as string | null, index: 0 })
   const [slashDismissed, setSlashDismissed] = useState(false)
   const [datasetMenuDismissed, setDatasetMenuDismissed] = useState(false)
-  const [visibleSlashDescriptionFor, setVisibleSlashDescriptionFor] = useState<string | null>(null)
   const [promptCursor, setPromptCursor] = useState(prompt.length)
 
   const chatEndRef = useRef<HTMLDivElement | null>(null)
+  const followLatestRef = useRef(true)
+  const wasStreamingRef = useRef(false)
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null)
   const slashListRef = useRef<HTMLDivElement | null>(null)
   const messageRefs = useRef<Array<HTMLDivElement | null>>([])
-  const slashDescriptionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const activeSlashTrigger = useMemo(() => getActivePromptTrigger(prompt, promptCursor, "/"), [prompt, promptCursor])
   const activeDatasetTrigger = useMemo(() => getActivePromptTrigger(prompt, promptCursor, "@"), [prompt, promptCursor])
   const slashQuery = activeSlashTrigger?.query ?? null
   const datasetQuery = activeDatasetTrigger?.query ?? null
+  if (slashSelection.query !== slashQuery) setSlashSelection({ query: slashQuery, index: 0 })
+  if (datasetSelection.query !== datasetQuery) setDatasetSelection({ query: datasetQuery, index: 0 })
+  const selectedSlashIndex = slashSelection.query === slashQuery ? slashSelection.index : 0
+  const selectedDatasetIndex = datasetSelection.query === datasetQuery ? datasetSelection.index : 0
+  const setSelectedSlashIndex = useCallback((update: SetStateAction<number>) => {
+    setSlashSelection((previous) => ({
+      query: slashQuery,
+      index: typeof update === "number" ? update : update(previous.query === slashQuery ? previous.index : 0),
+    }))
+  }, [slashQuery])
+  const setSelectedDatasetIndex = useCallback((update: SetStateAction<number>) => {
+    setDatasetSelection((previous) => ({
+      query: datasetQuery,
+      index: typeof update === "number" ? update : update(previous.query === datasetQuery ? previous.index : 0),
+    }))
+  }, [datasetQuery])
   const filteredSlashCommands = useMemo(() => {
     if (slashQuery === null) return []
     if (!slashQuery) return SLASH_COMMANDS
@@ -346,7 +469,6 @@ export function ChatPanel({
   const activeDatasetIndex = showDatasetMenu
     ? Math.min(selectedDatasetIndex, filteredDatasets.length - 1)
     : 0
-  const activeDescription = showSlashMenu ? visibleSlashDescriptionFor : null
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -356,37 +478,22 @@ export function ChatPanel({
   }, [prompt.length])
 
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" })
-  }, [chatMessages, isRunning])
+    const latest = chatMessages.at(-1)
+    const finishedAnalysis = wasStreamingRef.current && latest?.isStreaming === false
+    wasStreamingRef.current = Boolean(latest?.isStreaming)
+    if (!followLatestRef.current) return
+
+    if (finishedAnalysis || latest?.table_links?.length) {
+      messageRefs.current[chatMessages.length - 1]?.scrollIntoView({ block: "start" })
+    } else {
+      chatEndRef.current?.scrollIntoView({ block: "end" })
+    }
+  }, [chatMessages])
 
   useEffect(() => {
     if (highlightedMessageIndex === null) return
     messageRefs.current[highlightedMessageIndex]?.scrollIntoView({ behavior: "smooth", block: "center" })
   }, [highlightedMessageIndex])
-
-  const clearSlashDescriptionTimer = useCallback(() => {
-    if (!slashDescriptionTimerRef.current) return
-    clearTimeout(slashDescriptionTimerRef.current)
-    slashDescriptionTimerRef.current = null
-  }, [])
-
-  const hideSlashDescription = useCallback(() => {
-    clearSlashDescriptionTimer()
-    setVisibleSlashDescriptionFor(null)
-  }, [clearSlashDescriptionTimer])
-
-  const scheduleSlashDescription = useCallback((command: string) => {
-    clearSlashDescriptionTimer()
-    setVisibleSlashDescriptionFor(null)
-    slashDescriptionTimerRef.current = setTimeout(() => {
-      setVisibleSlashDescriptionFor(command)
-      slashDescriptionTimerRef.current = null
-    }, SLASH_DESCRIPTION_DELAY_MS)
-  }, [clearSlashDescriptionTimer])
-
-  useEffect(() => {
-    return () => clearSlashDescriptionTimer()
-  }, [clearSlashDescriptionTimer])
 
   const updatePromptCursor = useCallback((input = promptInputRef.current) => {
     if (!input) return
@@ -402,8 +509,6 @@ export function ChatPanel({
     setPromptCursor(nextCursor)
     setSlashDismissed(false)
     setSelectedSlashIndex(0)
-    setVisibleSlashDescriptionFor(null)
-    clearSlashDescriptionTimer()
 
     requestAnimationFrame(() => {
       const input = promptInputRef.current
@@ -411,7 +516,7 @@ export function ChatPanel({
       input.focus()
       input.setSelectionRange(nextCursor, nextCursor)
     })
-  }, [activeSlashTrigger, clearSlashDescriptionTimer, onPromptChange, prompt])
+  }, [activeSlashTrigger, onPromptChange, prompt, setSelectedSlashIndex])
 
   const insertDatasetMention = useCallback((dataset: WorkspaceDataset) => {
     if (!activeDatasetTrigger) return
@@ -429,7 +534,7 @@ export function ChatPanel({
       input.focus()
       input.setSelectionRange(nextCursor, nextCursor)
     })
-  }, [activeDatasetTrigger, onPromptChange, prompt])
+  }, [activeDatasetTrigger, onPromptChange, prompt, setSelectedDatasetIndex])
 
   const toggleTranscript = useCallback((index: number, nextOpen: boolean) => {
     setTranscriptVisibilityOverrides((prev) => ({
@@ -438,14 +543,25 @@ export function ChatPanel({
     }))
   }, [])
 
+  const submitPrompt = () => {
+    if (isUploading) return
+    followLatestRef.current = true
+    onSubmit()
+  }
+
   return (
     <div className="flex shrink-0 flex-col bg-card/30" style={{ width }}>
-      <div className="flex-1 min-h-0 overflow-auto p-3 space-y-3 scrollbar-thin">
+      <div
+        className="flex-1 min-h-0 overflow-auto p-3 space-y-3 scrollbar-thin"
+        onScroll={({ currentTarget }) => {
+          const { scrollTop, scrollHeight, clientHeight } = currentTarget
+          followLatestRef.current = scrollHeight - scrollTop - clientHeight < 64
+        }}
+      >
         {chatMessages.map((message, index) => (
           (() => {
             const messageThinkingTrace = Array.isArray(message.thinkingTrace) ? message.thinkingTrace : []
-            const defaultTranscriptOpen = false
-            const isTranscriptOpen = transcriptVisibilityOverrides[index] ?? defaultTranscriptOpen
+            const isTranscriptOpen = transcriptVisibilityOverrides[index] ?? Boolean(message.isStreaming)
             const isRollbackHighlight = highlightedMessageIndex === index
 
             return (
@@ -456,108 +572,36 @@ export function ChatPanel({
                 }}
                 className={`group flex flex-col ${message.role === "user" ? "items-end" : "items-start"}`}
               >
-                {message.role === "assistant" &&
-                  (messageThinkingTrace.length > 0 || Boolean(message.isStreaming)) && (
-                <div className="mb-1 w-full max-w-[90%]">
-                  <button
-                    type="button"
-                    onClick={() => toggleTranscript(index, !isTranscriptOpen)}
-                    aria-expanded={isTranscriptOpen}
-                    className={`flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[10px] font-medium transition-colors ${
-                      isTranscriptOpen
-                        ? "bg-primary/10 text-primary"
-                        : "text-muted-foreground hover:bg-accent hover:text-foreground"
-                    }`}
-                  >
-                    <BrainCircuit className="size-3" />
-                    {message.isStreaming ? "Working" : "Details"}
-                    <ChevronDown className={`size-3 transition-transform ${isTranscriptOpen ? "rotate-180" : ""}`} />
-                  </button>
-
-                  <div
-                    data-state={isTranscriptOpen ? "open" : "closed"}
-                    className="thinking-panel"
-                    aria-hidden={!isTranscriptOpen}
-                  >
-                    <div className="thinking-panel-surface mt-2 rounded-xl border border-border/70 bg-card/80 p-3 shadow-sm">
-                      <div className="mb-3 flex items-center justify-between gap-2">
-                        <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
-                          Thinking Transcript
-                        </div>
-                        <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
-                          {message.isStreaming && <span className="thinking-flow inline-block font-medium">Live</span>}
-                          <span>{message.modelLabel ?? modelLabel}</span>
-                        </div>
-                      </div>
-
-                      {messageThinkingTrace.length === 0 && message.isStreaming && (
-                        <p className="thinking-step-enter text-[12px] leading-relaxed text-muted-foreground">
-                          Preparing the first thinking step...
-                        </p>
-                      )}
-
-                      <div className="space-y-3">
-                        {messageThinkingTrace.map((entry, traceIndex) => (
-                          <div
-                            key={`${index}-trace-${traceIndex}`}
-                            className="thinking-step-enter relative pl-5"
-                            style={{ animationDelay: `${Math.min(traceIndex * 40, 180)}ms` }}
-                          >
-                            {traceIndex < messageThinkingTrace.length - 1 && (
-                              <div className="absolute left-[4px] top-3 bottom-[-14px] w-px bg-border/60" />
-                            )}
-                            <div className={`absolute left-0 top-1.5 size-2 rounded-full ${getTraceDotClass(entry)}`} />
-
-                            <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
-                              {getTraceLabel(entry)}
-                            </div>
-                            {!shouldHideObservationLead(entry) && (
-                              <p className="mt-1 whitespace-pre-wrap text-[12px] leading-relaxed text-foreground/85">
-                                {entry.content}
-                              </p>
-                            )}
-
-                            {entry.tool_name && (
-                              <div className="mt-2 text-[10px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
-                                {entry.tool_name}
-                              </div>
-                            )}
-
-                            {entry.tool_input && (
-                              <pre className="mt-1 overflow-x-auto rounded-lg border border-border/70 bg-background/70 p-2.5 text-[11px] font-mono text-foreground/80 whitespace-pre-wrap">
-                                {entry.tool_input}
-                              </pre>
-                            )}
-
-                            {entry.details && (
-                              <pre className="thinking-observation-preview mt-2 max-h-44 overflow-auto rounded-lg border border-border/70 bg-background/65 p-2.5 text-[11px] font-mono text-foreground/78 whitespace-pre-wrap">
-                                {entry.details}
-                              </pre>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                </div>
+                {message.role === "assistant" && (messageThinkingTrace.length > 0 || message.isStreaming) && (
+                  <AnalysisActivity
+                    trace={messageThinkingTrace}
+                    live={Boolean(message.isStreaming)}
+                    model={message.modelLabel ?? modelLabel}
+                    open={isTranscriptOpen}
+                    onToggle={() => toggleTranscript(index, !isTranscriptOpen)}
+                  />
                 )}
 
                 {message.role === "user" ? (
                   <div className={`prompt-message-bubble max-w-[90%] rounded-xl bg-primary px-3 py-2 text-[13px] leading-relaxed text-primary-foreground ${isRollbackHighlight ? "chat-rollback-bubble" : ""}`}>
                     {renderPromptTokens(message.content, datasets, "message")}
+                    {!!message.datasetScope?.length && (
+                      <div aria-label="Datasets used for this prompt" className="mt-2 flex flex-wrap gap-1.5">
+                        {message.datasetScope.map((name, scopeIndex) => (
+                          <span key={scopeIndex} className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-md bg-black/15 px-1.5 py-0.5 text-[10px]">
+                            <Paperclip aria-hidden="true" className="size-3 shrink-0" />
+                            <span className="truncate" title={name}>{name}</span>
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 ) : (
-                  message.content ? (
-                    index === chatMessages.length - 1 ? (
-                      <div className={isRollbackHighlight ? "chat-rollback-bubble rounded-xl" : ""}>
-                        <AssistantText key={message.content} text={message.content} />
-                      </div>
-                    ) : (
-                      <div className={`max-w-[90%] px-1 py-1 text-[13px] leading-relaxed text-foreground/92 ${isRollbackHighlight ? "chat-rollback-bubble rounded-xl" : ""}`}>
-                        {renderSimpleMarkdown(message.content)}
-                      </div>
-                    )
-                  ) : null
+                  message.content && (
+                    <div className={`max-w-[90%] break-words px-1 py-1 text-[13px] leading-relaxed text-foreground/92 ${isRollbackHighlight ? "chat-rollback-bubble rounded-xl" : ""}`}>
+                      {renderSimpleMarkdown(message.content)}
+                    </div>
+                  )
                 )}
 
                 {message.role === "assistant" && message.sources && message.sources.length > 0 && (
@@ -570,25 +614,26 @@ export function ChatPanel({
                   </div>
                 )}
 
-                {message.role === "assistant" &&
-                  Array.isArray(message.table_links) &&
-                  message.table_links.length > 0 && (
-                    <div className="mt-2 flex max-w-[90%] flex-wrap gap-1.5 px-1">
-                      {message.table_links.map((tableLink) => (
-                        <button
-                          key={`${index}-${tableLink.id}`}
-                          type="button"
-                          onClick={() => onOpenTableLink(tableLink.id)}
-                          className="inline-flex items-center gap-1 rounded-md border border-border bg-card px-2 py-1 text-[10px] font-medium text-foreground hover:bg-accent transition-colors"
-                          title="Open table in Data region"
-                        >
-                          <span className="text-primary truncate max-w-[200px]" title={tableLink.title}>
-                            {tableLink.title}
-                          </span>
-                        </button>
-                      ))}
-                    </div>
-                  )}
+                {message.role === "assistant" && Boolean(message.table_links?.length) && (
+                  <div className="mt-2 w-full max-w-[94%] min-w-0 space-y-2">
+                    {message.table_links?.map((link) => {
+                      const table = resultTables.find((item) => item.id === link.id)
+                      return table && (
+                        <ResultTablePreview key={link.id} table={table} onOpen={() => onOpenTableLink(link.id)} />
+                      )
+                    })}
+                  </div>
+                )}
+
+                {message.role === "assistant" && !message.table_links?.length && message.query_output?.trim()
+                  && message.query_output.trim() !== message.content.trim() && (
+                  <details className="mt-1 w-full max-w-[90%] text-xs text-muted-foreground">
+                    <summary className="cursor-pointer px-1 py-1">Execution output</summary>
+                    <pre className="max-h-48 overflow-auto rounded-lg border border-border bg-card p-2 text-[11px] whitespace-pre-wrap break-words">
+                      {message.query_output}
+                    </pre>
+                  </details>
+                )}
 
                 {message.role === "assistant" && message.code && (
                   <div className="mt-1 w-full max-w-[90%]">
@@ -598,7 +643,7 @@ export function ChatPanel({
                       className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] font-medium transition-colors ${
                         expandedCodeIndex === index
                           ? "text-primary bg-primary/10"
-                          : "text-muted-foreground hover:text-foreground hover:bg-accent opacity-0 group-hover:opacity-100"
+                          : "text-muted-foreground hover:text-foreground hover:bg-accent"
                       }`}
                     >
                       <Code className="size-3" />
@@ -607,7 +652,7 @@ export function ChatPanel({
 
                     {expandedCodeIndex === index && (
                       <div className="mt-1.5 w-full space-y-2">
-                        <pre className="w-full overflow-x-auto rounded-lg bg-[oklch(0.1_0_0)] p-2.5 text-[11px] font-mono text-[oklch(0.7_0_0)] border border-border whitespace-pre">
+                        <pre className="w-full max-h-64 overflow-auto rounded-lg bg-[oklch(0.1_0_0)] p-2.5 text-[11px] font-mono text-[oklch(0.7_0_0)] border border-border whitespace-pre">
                           {message.code}
                         </pre>
                       </div>
@@ -734,64 +779,109 @@ export function ChatPanel({
             data-side="top"
             className="menu-surface menu-popover absolute bottom-full left-0 right-0 mb-2 rounded-lg p-2 shadow-md"
           >
-              <div className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground space-y-1">
-                Commands
-              </div>
-              <div
-                ref={slashListRef}
-                className="max-h-56 overflow-y-auto scrollbar-thin pr-1"
-                onMouseLeave={hideSlashDescription}
-              >
-                <div className="relative space-y-1">
-                  <div
-                    className="pointer-events-none absolute left-0 right-0 rounded-md border border-primary/35 bg-primary/12 transform-gpu will-change-transform transition-transform duration-280 ease-[cubic-bezier(0.22,1,0.36,1)]"
-                    style={{
-                      height: `${SLASH_ROW_HEIGHT}px`,
-                      transform: `translateY(${activeSlashIndex * (SLASH_ROW_HEIGHT + SLASH_ROW_GAP)}px)`,
-                    }}
-                  />
+            <div className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+              Commands
+            </div>
+            <div
+              ref={slashListRef}
+              className="max-h-56 overflow-y-auto scrollbar-thin pr-1"
+            >
+              <div className="space-y-1">
+                {filteredSlashCommands.map((item, index) => {
+                  const isActive = index === activeSlashIndex
 
-                  {filteredSlashCommands.map((item, index) => {
-                    const isActive = index === activeSlashIndex
-                    const showDelayedDescription = activeDescription === item.command
-
-                    return (
-                      <button
-                        key={item.command}
-                        type="button"
-                        data-slash-option="true"
-                        onMouseDown={(event) => {
-                          event.preventDefault()
-                          insertSlashCommand(item)
-                        }}
-                        onMouseEnter={() => {
-                          setSelectedSlashIndex((prev) => (prev === index ? prev : index))
-                          scheduleSlashDescription(item.command)
-                        }}
-                        className={`relative z-10 h-8 w-full rounded-md px-2.5 text-left text-[12px] font-medium leading-none transition-colors duration-150 ${
-                          isActive ? "text-foreground" : "text-muted-foreground hover:text-foreground"
-                        }`}
-                      >
-                        {item.command}
-                        {showDelayedDescription && (
-                          <span className="pointer-events-none absolute left-2 right-2 bottom-[calc(100%+6px)] z-30 rounded-md border border-border bg-popover/95 px-2.5 py-1.5 text-[11px] font-medium leading-snug text-popover-foreground shadow-sm">
-                            {item.description}
-                          </span>
-                        )}
-                      </button>
-                    )
-                  })}
-                </div>
+                  return (
+                    <button
+                      key={item.command}
+                      type="button"
+                      data-slash-option="true"
+                      onMouseDown={(event) => {
+                        event.preventDefault()
+                        insertSlashCommand(item)
+                      }}
+                      onMouseEnter={() => {
+                        setSelectedSlashIndex(index)
+                      }}
+                      className={`flex h-8 w-full items-center justify-between gap-2 rounded-md px-2.5 text-left text-[12px] font-medium leading-none transition-colors ${
+                        isActive
+                          ? "border border-primary/35 bg-primary/12 text-foreground"
+                          : "border border-transparent text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+                      }`}
+                    >
+                      <span className="shrink-0 font-medium text-foreground">{item.command}</span>
+                      <span className="truncate text-[11px] text-muted-foreground">
+                        {item.description}
+                      </span>
+                    </button>
+                  )
+                })}
               </div>
+            </div>
           </div>
 
-          <div className="rounded-xl border border-border bg-secondary/70 shadow-sm transition focus-within:border-ring/70 focus-within:ring-2 focus-within:ring-ring/15">
+          <div
+            className={`relative rounded-xl border bg-secondary/70 shadow-sm transition focus-within:border-ring/70 focus-within:ring-2 focus-within:ring-ring/15 ${isDropTarget ? "border-primary ring-2 ring-primary/25" : "border-border"}`}
+            onDragEnter={(event) => {
+              if (!isDatasetDrop(event.dataTransfer)) return
+              event.preventDefault()
+              if (isRunning || isUploading) return
+              dropDepth.current += 1
+              setIsDropTarget(true)
+            }}
+            onDragOver={(event) => {
+              if (!isDatasetDrop(event.dataTransfer)) return
+              event.preventDefault()
+              event.dataTransfer.dropEffect = isRunning || isUploading ? "none" : "copy"
+            }}
+            onDragLeave={() => {
+              dropDepth.current = Math.max(0, dropDepth.current - 1)
+              if (!dropDepth.current) setIsDropTarget(false)
+            }}
+            onDrop={(event) => {
+              if (!isDatasetDrop(event.dataTransfer)) return
+              event.preventDefault()
+              dropDepth.current = 0
+              setIsDropTarget(false)
+              if (isRunning || isUploading) return
+              const files = Array.from(event.dataTransfer.files)
+              const datasetId = event.dataTransfer.getData(DATASET_DRAG_TYPE)
+              if (files.length) onDropFiles(files)
+              else if (datasetId) onAttachDataset(datasetId)
+              promptInputRef.current?.focus()
+            }}
+          >
+            {isDropTarget && (
+              <div className="pointer-events-none absolute inset-0 z-10 grid place-content-center rounded-xl bg-background/90 text-sm font-medium text-primary">
+                Drop to attach to this prompt
+              </div>
+            )}
+            {!!scopeDatasets.length && (
+              <div aria-label="Datasets in scope" className="flex max-h-24 flex-wrap items-center gap-1.5 overflow-y-auto border-b border-border/60 px-3 py-2">
+                <span className="mr-0.5 text-[10px] font-medium text-muted-foreground">In scope</span>
+                {scopeDatasets.map((dataset) => (
+                  <span key={dataset.id} className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-md border border-primary/25 bg-primary/10 px-1.5 py-0.5 text-[11px] font-medium text-primary">
+                    <span className="truncate" title={dataset.displayName}>@{dataset.displayName}</span>
+                    {detachableDatasetIds.includes(dataset.id) && (
+                      <button
+                        type="button"
+                        aria-label={`Detach ${dataset.displayName}`}
+                        disabled={isRunning}
+                        onClick={() => onDetachDataset(dataset.id)}
+                        className="rounded p-0.5 hover:bg-primary/15 disabled:opacity-40"
+                      >
+                        <X aria-hidden="true" className="size-3" />
+                      </button>
+                    )}
+                  </span>
+                ))}
+              </div>
+            )}
             <div className="relative min-h-20">
               <textarea
                 ref={promptInputRef}
                 className="relative block max-h-56 min-h-20 w-full resize-y rounded-t-xl bg-transparent px-3 py-2.5 text-sm leading-relaxed text-foreground outline-none placeholder:text-muted-foreground"
                 aria-label="Ask DataPilot"
-                placeholder="Ask DataPilot... Use @ to attach datasets or / for commands."
+                placeholder="Ask DataPilot… Drop files or use @ to select datasets."
                 rows={3}
                 spellCheck={false}
                 value={prompt}
@@ -805,7 +895,6 @@ export function ChatPanel({
                   setDatasetMenuDismissed(false)
 
                   if (!getActivePromptTrigger(nextValue, nextCursor, "/")) {
-                    hideSlashDescription()
                   }
                 }}
                 onClick={(event) => updatePromptCursor(event.currentTarget)}
@@ -851,7 +940,6 @@ export function ChatPanel({
 
                     if (event.key === "ArrowDown") {
                       event.preventDefault()
-                      hideSlashDescription()
                       setSelectedSlashIndex((prev) => {
                         const next = (prev + 1) % filteredSlashCommands.length
                         scrollSlashOptionIntoView(next)
@@ -862,7 +950,6 @@ export function ChatPanel({
 
                     if (event.key === "ArrowUp") {
                       event.preventDefault()
-                      hideSlashDescription()
                       setSelectedSlashIndex((prev) => {
                         const next = prev === 0 ? filteredSlashCommands.length - 1 : prev - 1
                         scrollSlashOptionIntoView(next)
@@ -883,7 +970,6 @@ export function ChatPanel({
                     if (event.key === "Escape") {
                       event.preventDefault()
                       setSlashDismissed(true)
-                      hideSlashDescription()
                       return
                     }
                   }
@@ -891,7 +977,7 @@ export function ChatPanel({
                   if (event.key === "Enter" && !event.shiftKey) {
                     event.preventDefault()
                     if (!isRunning) {
-                      onSubmit()
+                      submitPrompt()
                     }
                   }
                 }}
@@ -900,6 +986,28 @@ export function ChatPanel({
 
             <div className="flex items-center justify-between gap-2 px-2 py-2">
               <div className="flex min-w-0 items-center gap-2">
+                <input
+                  ref={attachInput}
+                  type="file"
+                  multiple
+                  accept=".csv,.xlsx,.xls"
+                  hidden
+                  onChange={(event) => {
+                    const files = Array.from(event.currentTarget.files ?? [])
+                    event.currentTarget.value = ""
+                    if (files.length) onDropFiles(files)
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={() => attachInput.current?.click()}
+                  disabled={isRunning || isUploading}
+                  aria-label="Attach files"
+                  title="Attach CSV or Excel files"
+                  className="inline-flex size-8 shrink-0 items-center justify-center rounded-md border border-border bg-card/70 text-muted-foreground hover:text-foreground disabled:opacity-50"
+                >
+                  <Paperclip aria-hidden="true" className="size-3.5" />
+                </button>
                 <button
                   type="button"
                   onClick={onToggleThinkingMode}
@@ -917,10 +1025,10 @@ export function ChatPanel({
                   Think
                 </button>
 
-                {isRunning && (
-                  <div className="flex min-w-0 items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+                {(isRunning || isUploading) && (
+                  <div role="status" className="flex min-w-0 items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
                     <Loader2 className="size-3.5 shrink-0 animate-spin" />
-                    <span className="truncate">{thinkingMode ? "Thinking..." : "Running..."}</span>
+                    <span className="truncate">{isUploading ? "Uploading…" : thinkingMode ? "Thinking..." : "Running..."}</span>
                   </div>
                 )}
               </div>
@@ -937,8 +1045,8 @@ export function ChatPanel({
               ) : (
                 <button
                   type="button"
-                  onClick={onSubmit}
-                  disabled={!prompt.trim()}
+                  onClick={submitPrompt}
+                  disabled={isUploading || !prompt.trim()}
                   className="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary px-3 text-xs font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:pointer-events-none disabled:opacity-40"
                 >
                   <Send className="size-3.5" />
